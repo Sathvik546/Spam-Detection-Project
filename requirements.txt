@@ -2,4 +2,9 @@ streamlit
 scikit-learn
 pandas
 numpy
-tensorflow
+opencv-python-headless
+requests
+tldextract
+beautifulsoup4
+plotly
+joblib
