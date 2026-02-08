@@ -1,10 +1,7 @@
 streamlit
-scikit-learn
+streamlit-option-menu
 pandas
 numpy
 opencv-python-headless
-requests
-tldextract
-beautifulsoup4
-plotly
-joblib
+Pillow
+easyocr
