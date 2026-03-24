@@ -1,337 +1,472 @@
-# app.py
 import streamlit as st
-import tensorflow as tf
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-import pickle
-from datetime import datetime
+from streamlit_option_menu import option_menu
 import pandas as pd
+import numpy as np
+import re
+import urllib.parse
+import ipaddress
+import string
+import cv2
+import easyocr
+import io
+from PIL import Image
 
-# -----------------------------
-# PAGE CONFIG
-# -----------------------------
+# -----------------------------------------------------------------------------
+# 1. PAGE CONFIGURATION
+# -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Spam Message Detector",
-    page_icon="📧",
-    layout="wide"
+    page_title="Phishing Defense",
+    page_icon="🛡️",
+    layout="centered"
 )
 
-# -----------------------------
-# LOAD MODEL & TOKENIZER
-# -----------------------------
-@st.cache_resource
-def load_model():
-    return tf.keras.models.load_model("spam_model.keras")
-
-@st.cache_resource
-def load_tokenizer():
-    with open("tokenizer.pickle", "rb") as handle:
-        tokenizer_obj = pickle.load(handle)
-    return tokenizer_obj
-
-model = load_model()
-tokenizer = load_tokenizer()
-MAX_LEN = 100  # must match training
-
-# -----------------------------
-# LOAD DATASET (OPTIONAL, FOR INSIGHTS TAB)
-# -----------------------------
-@st.cache_data
-def load_dataset():
-    try:
-        df = pd.read_csv("SPAM text message 20170820 - Data.csv", encoding="latin-1")
-        # Adjust column names if needed
-        if {"Category", "Message"}.issubset(set(df.columns)):
-            df = df[["Category", "Message"]].dropna()
-        return df
-    except FileNotFoundError:
-        return None
-
-dataset_df = load_dataset()
-
-# -----------------------------
-# HELPER FUNCTIONS
-# -----------------------------
-def predict_spam(message: str) -> float:
-    """Return spam probability between 0 and 1 for a single message."""
-    seq = tokenizer.texts_to_sequences([message])
-    padded = pad_sequences(seq, maxlen=MAX_LEN, padding="post", truncating="post")
-    pred = model.predict(padded, verbose=0)
-    return float(pred[0][0])
-
-
-def bulk_predict(messages):
-    """Takes a list of messages and returns a DataFrame with predictions."""
-    seqs = tokenizer.texts_to_sequences(messages)
-    padded = pad_sequences(seqs, maxlen=MAX_LEN, padding="post", truncating="post")
-    preds = model.predict(padded, verbose=0).reshape(-1)
-    return preds
-
-
-def init_history():
-    if "history" not in st.session_state:
-        st.session_state.history = []
-
-
-def add_to_history(source: str, message: str, score: float, label: str):
-    init_history()
-    st.session_state.history.append(
-        {
-            "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Source": source,
-            "Message": message,
-            "Spam Probability": round(score, 3),
-            "Prediction": label,
+# -----------------------------------------------------------------------------
+# 2. ADVANCED HEURISTIC ENGINE (Local Intelligence)
+# -----------------------------------------------------------------------------
+class PhishingAnalyzer:
+    def __init__(self):
+        # Dictionary of threat signatures
+        self.threat_db = {
+            "urgency": [
+                "urgent", "immediate", "act now", "suspended", "locked", "restricted", 
+                "unauthorized", "verify", "breach", "expires", "24 hours", "final notice",
+                "compromised", "action required"
+            ],
+            "financial": [
+                "wire", "transfer", "bank", "credit card", "debit", "irs", "tax", 
+                "refund", "bitcoin", "crypto", "payment", "invoice", "balance", "withdrawal"
+            ],
+            "scam_apps": [
+                "anydesk", "teamviewer", "zoho", "connectwise", "ultraviewer", 
+                "logmein", "remote support"
+            ],
+            "authority": [
+                "police", "fbi", "warrant", "arrest", "legal action", "law enforcement", 
+                "federal", "bureau", "social security", "ssa"
+            ],
+            "social_red_flags": [
+                "dm me", "direct message", "whatsapp", "telegram", "gift", "winner", 
+                "congratulations", "invest", "forex", "mentor"
+            ]
         }
-    )
+        
+        # Typosquatting targets and their common spoofs
+        self.brands = {
+            "paypal": ["paypa1", "pypal", "pay-pal", "paypal-secure", "security-paypal"],
+            "google": ["goggle", "googie", "gooogle", "google-security", "drive-google"],
+            "amazon": ["arnazon", "amaz0n", "amazon-prime-support", "amzon"],
+            "facebook": ["faceb0ok", "face-book", "meta-security", "meta-support"],
+            "apple": ["appie", "apple-id", "icloud-verify"],
+            "netflix": ["net-flix", "netflix-update"],
+            "bank": ["secure-banking", "account-update"]
+        }
 
+    def calculate_risk_level(self, score):
+        if score >= 85: return "CRITICAL"
+        if score >= 60: return "HIGH"
+        if score >= 35: return "MEDIUM"
+        if score > 0: return "LOW"
+        return "SAFE"
 
-def get_history_df():
-    init_history()
-    if not st.session_state.history:
-        return pd.DataFrame()
-    return pd.DataFrame(st.session_state.history)
+    def analyze_url(self, url):
+        score = 0
+        flags = []
+        
+        if not url.startswith(('http://', 'https://')):
+            url = 'http://' + url
+        
+        try:
+            parsed = urllib.parse.urlparse(url)
+            domain = parsed.hostname.lower() if parsed.hostname else ""
+            path = parsed.path.lower()
+        except:
+            return {"score": 0, "level": "Invalid", "flags": ["Invalid URL format"], "reason": "Could not parse URL."}
 
+        try:
+            ipaddress.ip_address(domain)
+            score += 80
+            flags.append("Domain is a raw IP address (Highly Suspicious)")
+        except ValueError:
+            pass
 
-# -----------------------------
-# SIDEBAR
-# -----------------------------
-st.sidebar.title("⚙️ Settings")
+        if len(domain) > 50:
+            score += 20
+            flags.append("Extremely long domain name")
+        
+        if domain.count('-') > 2:
+            score += 30
+            flags.append("Excessive use of hyphens in domain")
+            
+        if '@' in url:
+            score += 90
+            flags.append("Contains '@' symbol (Authentication bypass attempt)")
 
-threshold = st.sidebar.slider(
-    "Spam Threshold",
-    0.1, 0.9, 0.5, 0.05,
-    help="If spam probability ≥ this value, the message is marked as SPAM."
-)
+        brand_detected = False
+        for brand, variations in self.brands.items():
+            if brand in path and brand not in domain:
+                score += 40
+                flags.append(f"Brand '{brand}' found in URL path, not domain")
+            
+            if brand in domain and not domain.endswith(f".{brand}.com") and domain != f"{brand}.com":
+                score += 50
+                flags.append(f"Suspicious use of '{brand}' in subdomain")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📘 Model Details")
-st.sidebar.markdown(
-    """
-**Architecture**
-- Embedding (vocab size 10k, dim 64)  
-- Bidirectional LSTM (64 units)  
-- Dense (32 units, ReLU)  
-- Output (sigmoid)
+            for var in variations:
+                if var in domain:
+                    score += 85
+                    flags.append(f"Typosquatting detected: '{var}' mimics '{brand}'")
+                    brand_detected = True
+        
+        suspicious_tlds = ['.xyz', '.top', '.club', '.info', '.cn', '.ru', '.gq', '.ml']
+        if any(domain.endswith(tld) for tld in suspicious_tlds):
+            score += 20
+            flags.append("Uses a TLD often associated with spam")
 
-**Task:** SMS spam / ham classification  
-**Framework:** TensorFlow / Keras  
-**Test Accuracy:** ~98% (on held-out data)
+        if score == 0:
+            reason = "URL structure appears standard. No obvious heuristic threats detected."
+        else:
+            reason = "Multiple structural anomalies detected."
+
+        return {
+            "score": min(score, 100),
+            "level": self.calculate_risk_level(score),
+            "flags": flags,
+            "reason": reason
+        }
+
+    def analyze_text(self, text, context="general"):
+        score = 0
+        flags = []
+        text_lower = text.lower()
+        
+        urgency_count = sum(1 for w in self.threat_db["urgency"] if w in text_lower)
+        financial_count = sum(1 for w in self.threat_db["financial"] if w in text_lower)
+        
+        if urgency_count > 0:
+            score += 25 + (urgency_count * 5)
+            flags.append("Contains high-pressure urgency language")
+            
+        if financial_count > 0:
+            score += 25 + (financial_count * 5)
+            flags.append("Requests financial information or payment")
+
+        has_link = bool(re.search(r'http[s]?://|www\.', text_lower))
+        
+        if context == "SMS":
+            if has_link and urgency_count > 0:
+                score += 40
+                flags.append("Smishing Indicator: Urgency + Link")
+            if "package" in text_lower or "delivery" in text_lower:
+                if has_link:
+                    score += 30
+                    flags.append("Fake Delivery Scam pattern")
+
+        if context == "SOCIAL":
+            for phrase in self.threat_db["social_red_flags"]:
+                if phrase in text_lower:
+                    score += 30
+                    flags.append(f"Suspicious social phrase: '{phrase}'")
+            if "fill" in text_lower and "form" in text_lower:
+                score += 30
+                flags.append("Request to fill external form")
+
+        if context == "VOICE":
+            scam_apps = sum(1 for w in self.threat_db["scam_apps"] if w in text_lower)
+            auth_apps = sum(1 for w in self.threat_db["authority"] if w in text_lower)
+            
+            if scam_apps > 0:
+                score += 80
+                flags.append("Tech Support Scam: Remote Access Software mentioned")
+            if auth_apps > 0:
+                score += 70
+                flags.append("Authority Impersonation (Police/Gov)")
+            if "gift card" in text_lower:
+                score += 90
+                flags.append("Demanding payment via Gift Cards")
+
+        final_score = min(score, 100)
+        
+        reason = "Analysis complete based on behavioral heuristics."
+        if final_score < 20: reason = "Content appears normal."
+        elif final_score < 50: reason = "Some cautionary language detected."
+        else: reason = "Significant indicators of social engineering present."
+
+        return {
+            "score": final_score,
+            "level": self.calculate_risk_level(final_score),
+            "flags": flags,
+            "reason": reason
+        }
+
+    def analyze_social_profile(self, handle, message):
+        score = 0
+        flags = []
+        handle_lower = handle.lower()
+        
+        if "support" in handle_lower or "help" in handle_lower or "service" in handle_lower:
+            if re.search(r'\d{3,}$', handle_lower):
+                score += 60
+                flags.append("Fake Support Handle: Ends in random numbers")
+            
+            if handle_lower.count('_') > 1:
+                score += 30
+                flags.append("Suspicious handle formatting")
+        
+        text_result = self.analyze_text(message, context="SOCIAL")
+        score += text_result["score"]
+        flags.extend(text_result["flags"])
+        
+        return {
+            "score": min(score, 100),
+            "level": self.calculate_risk_level(min(score, 100)),
+            "flags": flags,
+            "reason": text_result["reason"]
+        }
+
+analyzer = PhishingAnalyzer()
+
+# -----------------------------------------------------------------------------
+# 3. CSS (Light Minimalist)
+# -----------------------------------------------------------------------------
+light_mode_css = """
+<style>
+.stApp {
+    background-color: #ffffff;
+    color: #111827;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.minimal-card {
+    background-color: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 32px;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+    transition: all 0.2s ease;
+}
+.minimal-card:hover {
+    border-color: #d1d5db;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+.minimal-card h3 {
+    font-weight: 600;
+    font-size: 1.125rem;
+    color: #111827;
+    margin-bottom: 8px;
+}
+.minimal-card p {
+    font-size: 0.875rem;
+    color: #6b7280;
+    line-height: 1.5;
+}
+.stTextInput > div > div > input, 
+.stTextArea > div > div > textarea {
+    background-color: #f9fafb !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    color: #111827 !important;
+    padding: 10px 12px !important;
+    font-size: 0.95rem !important;
+}
+.stTextInput > div > div > input:focus, 
+.stTextArea > div > div > textarea:focus {
+    border-color: #000000 !important;
+    box-shadow: 0 0 0 1px #000000 !important;
+}
+div.stButton > button {
+    background-color: #111827 !important;
+    color: #ffffff !important;
+    border: 1px solid #111827 !important;
+    border-radius: 6px !important;
+    padding: 10px 24px !important;
+    font-weight: 500 !important;
+}
+div.stButton > button:hover {
+    background-color: #374151 !important;
+    border-color: #374151 !important;
+}
+div[data-testid="stMetricValue"] {
+    font-weight: 600 !important;
+    font-size: 2rem !important;
+    color: #111827 !important;
+}
+div[data-testid="stMetricLabel"] {
+    color: #6b7280 !important;
+}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+</style>
 """
+st.markdown(light_mode_css, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 4. UI HELPERS
+# -----------------------------------------------------------------------------
+def card_start(title=None):
+    html = '<div class="minimal-card">'
+    if title: html += f'<h3>{title}</h3>'
+    st.markdown(html, unsafe_allow_html=True)
+
+def card_end():
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def display_results(result):
+    if not result: return
+    st.divider()
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("Risk Score", f"{result['score']}")
+        level = result['level']
+        color = "#10b981" 
+        if level in ["HIGH", "CRITICAL"]: color = "#ef4444"
+        elif level == "MEDIUM": color = "#f97316"
+        st.markdown(f"<span style='color:{color}; font-weight:700; letter-spacing:0.05em;'>{level} RISK</span>", unsafe_allow_html=True)
+    with c2:
+        st.subheader("Details")
+        if not result['flags']:
+            st.success("No specific threat patterns detected.")
+        else:
+            for f in result['flags']:
+                st.markdown(f"🚩 {f}")
+        st.caption(f"Reasoning: {result['reason']}")
+
+# -----------------------------------------------------------------------------
+# 5. MAIN APP
+# -----------------------------------------------------------------------------
+st.markdown("<h1 style='color:#111827; font-weight:700; letter-spacing:-0.03em;'>Phishing Defense</h1>", unsafe_allow_html=True)
+st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+
+selected = option_menu(
+    menu_title=None,
+    options=["Dashboard", "URL Scanner", "Smishing", "Social", "Vishing", "Forensics"],
+    icons=["grid", "globe", "chat-text", "people", "mic", "camera"],
+    default_index=0,
+    orientation="horizontal",
+    styles={
+        "container": {"padding": "0!important", "background-color": "transparent"},
+        "icon": {"color": "#6b7280", "font-size": "14px"}, 
+        "nav-link": {"font-size": "13px", "text-align": "center", "margin": "0px 8px 0px 0px", "color": "#4b5563", "background-color": "transparent"},
+        "nav-link-selected": {"background-color": "#f3f4f6", "color": "#111827", "font-weight": "600"},
+    }
 )
+st.write("")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🧪 Quick Samples")
-sample_spam_btn = st.sidebar.button("Insert sample SPAM")
-sample_ham_btn = st.sidebar.button("Insert sample HAM")
+if selected == "Dashboard":
+    st.markdown("<div class='minimal-card' style='text-align:center; padding:40px;'><h3 style='font-size:1.5rem;'>Unified Defense Suite</h3><p>Advanced Heuristic Detection • No API Keys Required</p></div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        card_start("URL Scanner")
+        st.write("Detects typosquatting, IP masking, and malicious structures.")
+        card_end()
+    with c2:
+        card_start("Smishing")
+        st.write("Analyzes SMS for urgency, financial keywords, and links.")
+        card_end()
+    with c3:
+        card_start("Social Media")
+        st.write("Identifies fake support handles and angler phishing.")
+        card_end()
+    c4, c5 = st.columns(2)
+    with c4:
+        card_start("Voice Analysis")
+        st.write("Scans transcripts for Tech Support & IRS scam scripts.")
+        card_end()
+    with c5:
+        card_start("Forensics")
+        st.write("OCR & QR Code extraction with automated scanning.")
+        card_end()
 
-st.sidebar.markdown("---")
-# History download
-history_df_for_download = get_history_df()
-if not history_df_for_download.empty:
-    csv_data = history_df_for_download.to_csv(index=False).encode("utf-8")
-    st.sidebar.download_button(
-        label="⬇️ Download Prediction History (CSV)",
-        data=csv_data,
-        file_name="spam_detection_history.csv",
-        mime="text/csv",
-    )
-
-# -----------------------------
-# HEADER
-# -----------------------------
-st.markdown(
-    """
-<div style="background-color:#0f4c75;padding:18px;border-radius:14px;margin-bottom:18px;">
-  <h2 style="color:white;text-align:center;margin-bottom:4px;">📧 Spam Message Detection Dashboard</h2>
-  <p style="color:#eeeeee;text-align:center;margin:0;">
-    Analyze individual SMS messages or bulk data using a BiLSTM-based spam classifier.
-  </p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# -----------------------------
-# TABS
-# -----------------------------
-tab1, tab2, tab3 = st.tabs(["🔍 Single Message", "📂 Bulk Analysis", "📊 Dataset Insights"])
-
-# -----------------------------
-# TAB 1: SINGLE MESSAGE
-# -----------------------------
-with tab1:
-    st.subheader("🔍 Single Message Classification")
-
-    default_text = ""
-    if sample_spam_btn:
-        default_text = "Congratulations! You have won a free lottery ticket. Click this link now to claim your prize."
-    elif sample_ham_btn:
-        default_text = "Hey, I will reach college by 10 AM. Wait near the main gate."
-
-    user_input = st.text_area(
-        "✍️ Enter your SMS message:",
-        value=default_text,
-        height=150,
-        placeholder="Example: 'Dear user, your account has been selected for a special reward...'",
-    )
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        single_predict_btn = st.button("🔎 Analyze", use_container_width=True)
-    with col2:
-        clear_history_btn = st.button("🧹 Clear History", use_container_width=True)
-    with col3:
-        show_raw_history_btn = st.button("📜 Show History Table", use_container_width=True)
-
-    if clear_history_btn:
-        st.session_state.history = []
-        st.success("History cleared.")
-
-    if single_predict_btn:
-        if not user_input.strip():
-            st.warning("Please enter a message before analyzing.", icon="⚠️")
+elif selected == "URL Scanner":
+    card_start()
+    st.markdown("### URL Scanner")
+    url_input = st.text_input("Enter URL", placeholder="http://example.com", label_visibility="collapsed")
+    if st.button("Scan Link"):
+        if url_input:
+            res = analyzer.analyze_url(url_input)
+            display_results(res)
         else:
-            score = predict_spam(user_input)
-            label = "SPAM" if score >= threshold else "HAM"
+            st.warning("Input required.")
+    card_end()
 
-            # Result box
-            if label == "SPAM":
-                st.error(
-                    f"🚫 This looks like **SPAM**.\n\n"
-                    f"- Spam probability: **{score:.2f}**\n"
-                    f"- Threshold: **{threshold:.2f}**",
-                    icon="🚫",
-                )
-            else:
-                st.success(
-                    f"✅ This looks like **HAM (Not Spam)**.\n\n"
-                    f"- Spam probability: **{score:.2f}**\n"
-                    f"- Threshold: **{threshold:.2f}**",
-                    icon="✅",
-                )
-
-            # Probability bar chart
-            st.subheader("📊 Probability")
-            st.bar_chart(
-                data={
-                    "Spam": [score],
-                    "Ham": [1 - score],
-                }
-            )
-
-            add_to_history("Single", user_input, score, label)
-
-    if show_raw_history_btn:
-        hist_df = get_history_df()
-        if hist_df.empty:
-            st.info("No predictions yet to show in history.")
+elif selected == "Smishing":
+    card_start()
+    st.markdown("### Smishing Detector")
+    txt = st.text_area("Message", placeholder="Paste message...", height=120, label_visibility="collapsed")
+    if st.button("Analyze SMS"):
+        if txt:
+            res = analyzer.analyze_text(txt, context="SMS")
+            display_results(res)
         else:
-            st.subheader("📜 Prediction History (All Sources)")
-            st.dataframe(hist_df, use_container_width=True)
+            st.warning("Input required.")
+    card_end()
 
-# -----------------------------
-# TAB 2: BULK ANALYSIS
-# -----------------------------
-with tab2:
-    st.subheader("📂 Bulk Message Classification")
-
-    st.write("You can either:")
-    st.markdown("- Paste multiple messages (one per line), **or**")
-    st.markdown("- Upload a CSV file with a **'Message'** column.")
-
-    bulk_input_method = st.radio("Choose input method:", ["📝 Paste text", "📁 Upload CSV"], horizontal=True)
-
-    messages = []
-
-    if bulk_input_method == "📝 Paste text":
-        bulk_text = st.text_area(
-            "Paste messages (one per line):",
-            height=200,
-            placeholder="Line 1: message 1\nLine 2: message 2\nLine 3: message 3\n..."
-        )
-        if bulk_text.strip():
-            messages = [line.strip() for line in bulk_text.split("\n") if line.strip()]
-    else:
-        uploaded_file = st.file_uploader("Upload CSV file with a 'Message' column", type=["csv"])
-        if uploaded_file is not None:
-            try:
-                upload_df = pd.read_csv(uploaded_file)
-                if "Message" in upload_df.columns:
-                    messages = upload_df["Message"].astype(str).tolist()
-                    st.success(f"Loaded {len(messages)} messages from CSV.")
-                    st.dataframe(upload_df.head(), use_container_width=True)
-                else:
-                    st.error("CSV must contain a column named 'Message'.")
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
-
-    if st.button("🚀 Run Bulk Classification", use_container_width=True):
-        if not messages:
-            st.warning("Please provide at least one message.", icon="⚠️")
+elif selected == "Social":
+    card_start()
+    st.markdown("### Social Media Scanner")
+    c1, c2 = st.columns(2)
+    with c1:
+        h = st.text_input("Handle", placeholder="@PayPal_Support_123")
+    with c2:
+        m = st.text_input("Message", placeholder="DM us for help...")
+    if st.button("Scan Profile"):
+        if h and m:
+            res = analyzer.analyze_social_profile(h, m)
+            display_results(res)
         else:
-            preds = bulk_predict(messages)
-            labels = ["SPAM" if p >= threshold else "HAM" for p in preds]
-            results_df = pd.DataFrame(
-                {
-                    "Message": messages,
-                    "Spam Probability": preds,
-                    "Prediction": labels,
-                }
-            )
+            st.warning("Both handle and message are required.")
+    card_end()
 
-            st.subheader("📊 Bulk Classification Results")
-            st.dataframe(results_df, use_container_width=True)
+elif selected == "Vishing":
+    card_start()
+    st.markdown("### Voice Transcript")
+    v_txt = st.text_area("Transcript", placeholder="Transcript...", height=150, label_visibility="collapsed")
+    if st.button("Scan Transcript"):
+        if v_txt:
+            res = analyzer.analyze_text(v_txt, context="VOICE")
+            display_results(res)
+        else:
+            st.warning("Input required.")
+    card_end()
 
-            # Summary counts
-            spam_count = (results_df["Prediction"] == "SPAM").sum()
-            ham_count = (results_df["Prediction"] == "HAM").sum()
-            st.write(f"**Summary:** SPAM: {spam_count} | HAM: {ham_count}")
+elif selected == "Forensics":
+    @st.cache_resource
+    def load_ocr():
+        return easyocr.Reader(['en'], gpu=False)
 
-            # Add to history
-            for msg, score, lab in zip(messages, preds, labels):
-                add_to_history("Bulk", msg, float(score), lab)
-
-            # Download results
-            csv_bulk = results_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="⬇️ Download Results as CSV",
-                data=csv_bulk,
-                file_name="bulk_spam_classification_results.csv",
-                mime="text/csv",
-            )
-
-# -----------------------------
-# TAB 3: DATASET INSIGHTS
-# -----------------------------
-with tab3:
-    st.subheader("📊 Dataset Insights")
-
-    if dataset_df is None:
-        st.warning(
-            "Could not find 'SPAM text message 20170820 - Data.csv' in the app folder. "
-            "Place the dataset file next to app.py to see insights.",
-            icon="⚠️",
-        )
-    else:
-        st.write("Basic statistics about the dataset used to train the model:")
-
-        total = len(dataset_df)
-        spam_count = (dataset_df["Category"].str.lower() == "spam").sum()
-        ham_count = (dataset_df["Category"].str.lower() == "ham").sum()
-        spam_pct = (spam_count / total) * 100 if total > 0 else 0
-
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total Messages", total)
-        col_b.metric("Spam Messages", spam_count)
-        col_c.metric("Spam Percentage", f"{spam_pct:.1f}%")
-
-        st.markdown("### 📊 Spam vs Ham Count")
-        count_df = pd.DataFrame(
-            {"Label": ["HAM", "SPAM"], "Count": [ham_count, spam_count]}
-        ).set_index("Label")
-        st.bar_chart(count_df)
-
-        st.markdown("### 🔎 Sample Messages")
-        st.dataframe(dataset_df.sample(min(10, len(dataset_df))), use_container_width=True)
-
-st.caption("🔒 All predictions are computed locally on your machine using your trained BiLSTM model.")
+    card_start()
+    st.markdown("### Forensics")
+    uf = st.file_uploader("Upload", type=['png','jpg','jpeg'], label_visibility="collapsed")
+    if uf:
+        try:
+            file_bytes = np.asarray(bytearray(uf.read()), dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, 1)
+            if img is not None:
+                st.image(img, channels="BGR", width=300)
+                st.divider()
+                try:
+                    det = cv2.QRCodeDetector()
+                    data, _, _ = det.detectAndDecode(img)
+                    if data:
+                        st.info(f"QR Data: {data}")
+                        q_res = analyzer.analyze_url(data)
+                        display_results(q_res)
+                    else:
+                        st.caption("No QR Code.")
+                except: pass
+                st.markdown("---")
+                try:
+                    with st.spinner("Extracting text..."):
+                        reader = load_ocr()
+                        raw_res = reader.readtext(img, detail=0)
+                        extracted = " ".join(raw_res)
+                        if extracted.strip():
+                            st.text_area("Extracted Text", extracted, height=100)
+                            ocr_res = analyzer.analyze_text(extracted, context="SMS")
+                            display_results(ocr_res)
+                        else:
+                            st.info("No readable text found.")
+                except Exception as e:
+                    st.error(f"OCR Error: {e}")
+        except:
+            st.error("File error.")
+    card_end()
