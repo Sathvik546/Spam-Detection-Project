@@ -1,6 +1,6 @@
-streamlit
-streamlit-option-menu
-pandas
-numpy
-scikit-learn
-tldextract
+streamlit>=1.28.0
+streamlit-option-menu>=0.3.6
+pandas>=1.5.0
+numpy>=1.23.0
+scikit-learn>=1.2.0
+tldextract>=3.4.0
