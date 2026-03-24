@@ -2,1073 +2,995 @@ import streamlit as st
 from streamlit_option_menu import option_menu
 import pandas as pd
 import numpy as np
-import re
-import tldextract
-import os
-import math
-import hashlib
-import unicodedata
-from urllib.parse import urlparse, unquote, parse_qs
+import re, os, math, base64, io
+from urllib.parse import urlparse, unquote
 from collections import Counter
 
-# ── sklearn ──────────────────────────────────────────────────────────────────
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import MultinomialNB, ComplementNB
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.naive_bayes import ComplementNB
 from sklearn.svm import LinearSVC
+from sklearn.ensemble import VotingClassifier
 from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import StratifiedKFold
+import tldextract
 
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="PhishGuard", page_icon="🛡️", layout="centered")
+st.set_page_config(page_title="PhishGuard AI", page_icon="🛡️", layout="centered")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 1 ── KNOWLEDGE BASES
+# 1.  KNOWLEDGE BASES
 # ══════════════════════════════════════════════════════════════════════════════
-
 WHITELIST = {
     'google','youtube','facebook','github','linkedin','microsoft','apple',
     'amazon','wikipedia','twitter','instagram','netflix','spotify','adobe',
     'dropbox','paypal','reddit','stackoverflow','openai','anthropic','stripe',
     'shopify','slack','zoom','notion','figma','vercel','cloudflare','aws',
     'azure','salesforce','hubspot','mailchimp','twilio','sendgrid','okta',
-    'atlassian','jira','confluence','bitbucket','gitlab','docker','kubernetes',
-    'digitalocean','heroku','mongodb','firebase','supabase','neon','planetscale',
-    'chase','wellsfargo','bankofamerica','citibank','hsbc','barclays',
-    'irs','gov','edu','mil'
+    'atlassian','jira','gitlab','docker','digitalocean','heroku','mongodb',
+    'firebase','chase','wellsfargo','bankofamerica','citibank','hsbc','barclays',
 }
 
 BAD_TLDS = {
     'xyz','top','club','online','vip','click','tk','ml','cf','ga','gq',
     'work','rest','date','download','loan','win','bid','racing','review',
     'stream','party','trade','science','accountant','cricket','faith',
-    'men','ninja','pw','kim','country','icu','buzz','live','monster',
-    'hair','beauty','fyi','fit','cam','porn','adult'
+    'men','ninja','pw','kim','country','icu','buzz','monster','fyi','fit','cam',
 }
-
-GOOD_TLDS = {'com','org','net','edu','gov','mil','io','co','uk','de','fr','jp','ca','au'}
 
 BRAND_NAMES = [
     'paypal','amazon','apple','google','microsoft','facebook','netflix',
-    'instagram','twitter','bank','chase','wells','citibank','hsbc',
-    'barclays','ebay','alibaba','tiktok','whatsapp','telegram','discord',
-    'linkedin','dropbox','adobe','spotify','walmart','target','bestbuy',
-    'fedex','ups','dhl','usps','irs','dmv','medicare','socialsecurity',
-    'binance','coinbase','metamask','ethereum','bitcoin','blockchain'
+    'instagram','twitter','bank','chase','wells','citibank','hsbc','barclays',
+    'ebay','alibaba','tiktok','whatsapp','telegram','discord','linkedin',
+    'dropbox','adobe','spotify','walmart','fedex','ups','dhl','usps','irs',
+    'binance','coinbase','metamask','ethereum','bitcoin','blockchain',
 ]
 
-HOMOGLYPH_MAP = {
-    '0': 'o', '1': 'l', '3': 'e', '4': 'a', '5': 's', '6': 'b',
-    '7': 't', '8': 'b', '@': 'a', '$': 's', '|': 'i', '!': 'i'
-}
+HOMOGLYPH = {'0':'o','1':'l','3':'e','4':'a','5':'s','6':'b','7':'t','@':'a','$':'s','|':'i'}
 
-# Safety alternatives database
+# ─── Safety database ──────────────────────────────────────────────────────────
 SAFETY_DB = {
-    'paypal':     {'site':'paypal.com',        'app':'PayPal (App Store / Google Play)',   'contact':'1-888-221-1161',   'tip':'Only ever log in at paypal.com directly — never from a link in email.'},
-    'amazon':     {'site':'amazon.com',         'app':'Amazon Shopping App',               'contact':'1-888-280-4331',   'tip':'Amazon never asks for gift card payments or account passwords via email.'},
-    'apple':      {'site':'apple.com/support',  'app':'Apple Support App',                 'contact':'1-800-275-2273',   'tip':'Apple will never call you about iCloud being hacked. Hang up.'},
-    'google':     {'site':'myaccount.google.com','app':'Google One App',                   'contact':'support.google.com','tip':'Sign in at accounts.google.com — Google will never email you a login link.'},
-    'microsoft':  {'site':'account.microsoft.com','app':'Microsoft Authenticator',         'contact':'1-800-642-7676',   'tip':'Microsoft support will never call you unsolicited about your computer.'},
-    'facebook':   {'site':'facebook.com',        'app':'Facebook / Meta App',              'contact':'facebook.com/help','tip':'Facebook will never ask for your password over email or Messenger.'},
-    'netflix':    {'site':'netflix.com',         'app':'Netflix App',                      'contact':'1-888-638-3549',   'tip':'Netflix will never ask for payment via gift cards.'},
-    'instagram':  {'site':'instagram.com',       'app':'Instagram App',                    'contact':'help.instagram.com','tip':'If told your account was hacked, go directly to Instagram.com/hacked.'},
-    'bank':       {'site':'Use the URL on the back of your card','app':'Your bank\'s official app','contact':'Number on your card/statement','tip':'Your bank will NEVER ask for your full PIN or password over email or SMS.'},
-    'chase':      {'site':'chase.com',           'app':'Chase Mobile App',                 'contact':'1-800-935-9935',   'tip':'Chase will never send a link in an SMS asking you to verify your card.'},
-    'irs':        {'site':'irs.gov',             'app':'IRS2Go App',                       'contact':'1-800-829-1040',   'tip':'The IRS only contacts you by postal mail first — never by phone, text or email.'},
-    'crypto':     {'site':'coinbase.com or binance.com','app':'Coinbase / Binance official app','contact':'support.coinbase.com','tip':'No legitimate crypto platform will ever ask for your seed phrase. Ever.'},
-    'login':      {'site':'Type the official URL directly in your browser','app':'Download the official app','contact':'Use the number on the official website','tip':'Never click login links from emails — type the URL yourself.'},
-    'default':    {'site':'Type the official address directly in your browser','app':'Download the official app from App Store / Google Play','contact':'Find the contact on the official website','tip':'When in doubt, do NOT click — search for the official website on Google.'}
+    'paypal':    ('paypal.com',          'PayPal official app',            '1-888-221-1161',
+                  'PayPal will NEVER email you a link to log in. Always go to paypal.com directly.'),
+    'amazon':    ('amazon.com',          'Amazon Shopping app',            '1-888-280-4331',
+                  'Amazon never requests gift-card payments or passwords via email.'),
+    'apple':     ('apple.com/support',   'Apple Support app',              '1-800-275-2273',
+                  'Apple will never call you about an iCloud breach. Hang up immediately.'),
+    'google':    ('myaccount.google.com','Google One app',                 'support.google.com',
+                  'Google never sends a "click to verify" email with a login link.'),
+    'microsoft': ('account.microsoft.com','Microsoft Authenticator app',   '1-800-642-7676',
+                  'Microsoft support will never cold-call you about your computer.'),
+    'facebook':  ('facebook.com',        'Facebook / Meta app',            'facebook.com/help',
+                  'Facebook will never ask for your password over email or Messenger.'),
+    'netflix':   ('netflix.com',         'Netflix app',                    '1-888-638-3549',
+                  'Netflix never requests gift-card payments. Cancel at netflix.com directly.'),
+    'instagram': ('instagram.com',       'Instagram app',                  'help.instagram.com',
+                  'If told your account was hacked, go to instagram.com/hacked directly.'),
+    'bank':      ('URL on back of your card','Your bank\'s official app',  'Number on your card',
+                  'Your bank will NEVER ask for your full PIN or password via SMS or email.'),
+    'irs':       ('irs.gov',             'IRS2Go app',                     '1-800-829-1040',
+                  'The IRS contacts you by postal mail first — never by phone, text, or email.'),
+    'crypto':    ('coinbase.com / binance.com','Official exchange app',    'support.coinbase.com',
+                  'No legitimate crypto platform will ever ask for your seed phrase. Ever.'),
+    'dhl':       ('dhl.com',             'DHL Express app',                '1-800-225-5345',
+                  'DHL never asks for customs fees via SMS link. Check parcels at dhl.com.'),
+    'fedex':     ('fedex.com',           'FedEx Mobile app',               '1-800-463-3339',
+                  'FedEx delivery-fee SMS/email links are almost always phishing.'),
+    'default':   ('Type the official address directly in your browser',
+                  'Download the official app from App Store / Google Play',
+                  'Find the contact number on the official website',
+                  'When in doubt — do NOT click. Search for the official website on Google.'),
 }
 
-def get_safety_card(url_str: str, flags_text: str) -> dict:
-    combined = (url_str + " " + flags_text).lower()
-    for key, rec in SAFETY_DB.items():
-        if key != 'default' and key in combined:
-            return rec
-    return SAFETY_DB['default']
+def get_safety(context: str) -> dict:
+    c = context.lower()
+    for key, vals in SAFETY_DB.items():
+        if key != 'default' and key in c:
+            return {'site': vals[0], 'app': vals[1], 'contact': vals[2], 'tip': vals[3]}
+    d = SAFETY_DB['default']
+    return {'site': d[0], 'app': d[1], 'contact': d[2], 'tip': d[3]}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2 ── FEATURE ENGINEERING (Custom sklearn transformers)
+# 2.  ENSEMBLE ML MODEL
 # ══════════════════════════════════════════════════════════════════════════════
-
-class TextFeatureExtractor(BaseEstimator, TransformerMixin):
-    """Extracts 40+ hand-crafted numeric features from raw text."""
-
-    URGENT_WORDS = re.compile(
-        r'\b(urgent|immediately|act now|expires?|deadline|last chance|limited time|within \d+ hours?|'
-        r'asap|right now|today only|do not ignore|respond now|don\'t delay|'
-        r'your account (will be|has been)|suspended|blocked|locked|restricted|compromised|'
-        r'verify now|confirm now|click (below|here|now)|call (now|immediately))\b', re.I)
-
-    MONEY_WORDS = re.compile(
-        r'(\$[\d,]+|\d+ dollars?|free money|won|winner|lottery|prize|jackpot|'
-        r'inheritance|million|billion|unclaimed|reward|cash|voucher|gift card|coupon)', re.I)
-
-    CREDENTIAL_WORDS = re.compile(
-        r'\b(password|passwd|passw0rd|p@ssword|pin|otp|ssn|social security|'
-        r'credit card|debit card|card number|cvv|expiry|bank account|routing|'
-        r'username|user.?id|login|sign.?in|authenticate|verification code|'
-        r'access code|security code|account number|billing)\b', re.I)
-
-    IMPERSONATE_WORDS = re.compile(
-        r'\b(amazon|paypal|apple|google|microsoft|facebook|instagram|netflix|'
-        r'bank|chase|wells fargo|citibank|irs|fbi|police|government|'
-        r'your (bank|provider|carrier|service)|customer service|support team|'
-        r'technical support|it department|security team|fraud department)\b', re.I)
-
-    URL_PATTERN = re.compile(r'https?://\S+|www\.\S+', re.I)
-    PHONE_PATTERN = re.compile(r'(\+?\d[\d\s\-\(\)]{7,}\d)')
-    ALL_CAPS_PATTERN = re.compile(r'\b[A-Z]{4,}\b')
-
-    def _entropy(self, text: str) -> float:
-        if not text: return 0.0
-        counts = Counter(text)
-        total = len(text)
-        return -sum((c/total)*math.log2(c/total) for c in counts.values())
-
-    def _ratio_non_alpha(self, text: str) -> float:
-        if not text: return 0.0
-        return sum(1 for c in text if not c.isalpha()) / len(text)
-
-    def transform(self, texts, y=None):
-        out = []
-        for text in texts:
-            t = str(text)
-            tl = t.lower()
-            words = tl.split()
-            sentences = re.split(r'[.!?]', t)
-            urls = self.URL_PATTERN.findall(t)
-
-            feats = [
-                # Urgency
-                len(self.URGENT_WORDS.findall(tl)),
-                # Money
-                len(self.MONEY_WORDS.findall(tl)),
-                # Credentials
-                len(self.CREDENTIAL_WORDS.findall(tl)),
-                # Impersonation
-                len(self.IMPERSONATE_WORDS.findall(tl)),
-                # URL count
-                len(urls),
-                # Phone numbers
-                len(self.PHONE_PATTERN.findall(t)),
-                # ALL CAPS words
-                len(self.ALL_CAPS_PATTERN.findall(t)),
-                # Exclamation marks
-                t.count('!'),
-                # Question marks
-                t.count('?'),
-                # Dollar signs
-                t.count('$'),
-                # Message length
-                len(t),
-                # Word count
-                len(words),
-                # Avg word length
-                np.mean([len(w) for w in words]) if words else 0,
-                # Sentence count
-                len([s for s in sentences if s.strip()]),
-                # Ratio non-alpha chars
-                self._ratio_non_alpha(t),
-                # Entropy of text (random-looking text = high entropy)
-                self._entropy(tl[:500]),
-                # Contains "click here" or similar
-                int(bool(re.search(r'click\s+(here|below|link|now|this)', tl))),
-                # Contains unsubscribe (spam marker)
-                int('unsubscribe' in tl),
-                # Contains reply-to mismatch indicator
-                int(bool(re.search(r'reply.?to\b', tl))),
-                # Has suspicious URL pattern
-                int(any(re.search(r'(login|verify|secure|account|update)', u.lower()) for u in urls)),
-                # Has IP-based URL
-                int(any(re.search(r'https?://\d{1,3}\.\d{1,3}', u) for u in urls)),
-                # Multiple URLs
-                int(len(urls) > 1),
-                # Contains "dear customer/user/member"
-                int(bool(re.search(r'\bdear\s+(customer|user|member|account holder|client|friend|sir|madam)\b', tl))),
-                # Greeting with generic name
-                int(bool(re.search(r'\b(hello|hi|dear|greetings)\b', tl[:50]))),
-                # Contains threatening language
-                int(bool(re.search(r'\b(legal action|arrest|police|court|terminate|close your account|permanent(ly)?)\b', tl))),
-                # Contains "you have been selected"
-                int(bool(re.search(r'\b(selected|chosen|eligible|qualified|awarded)\b', tl))),
-                # Has base64-like content
-                int(bool(re.search(r'[A-Za-z0-9+/]{30,}={0,2}', t))),
-                # Ratio of digits
-                sum(c.isdigit() for c in t) / max(len(t), 1),
-                # Contains crypto keywords
-                int(bool(re.search(r'\b(bitcoin|crypto|ethereum|wallet|seed phrase|private key|nft|blockchain)\b', tl))),
-                # Contains fake invoice / shipment
-                int(bool(re.search(r'\b(invoice|receipt|shipment|tracking|delivery|order #|package|parcel)\b', tl))),
-            ]
-            out.append(feats)
-        return np.array(out, dtype=float)
-
-    def fit(self, X, y=None):
-        return self
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECTION 3 ── ENSEMBLE ML MODEL
-# ══════════════════════════════════════════════════════════════════════════════
-
 @st.cache_resource(show_spinner=False)
 def build_model():
-    """
-    Builds a stacked ensemble even without a dataset.
-    If a dataset exists, trains on it. Otherwise returns a heuristic-only flag.
-    """
-    status_parts = []
-
-    # ── Feature pipeline ──────────────────────────────────────────────────────
-    text_features = FeatureUnion([
-        ('word_tfidf', TfidfVectorizer(
-            analyzer='word', stop_words='english',
-            max_features=12000, ngram_range=(1, 3),
-            sublinear_tf=True, min_df=1
-        )),
-        ('char_tfidf', TfidfVectorizer(
-            analyzer='char_wb', max_features=8000,
-            ngram_range=(3, 5), sublinear_tf=True, min_df=1
-        )),
-        ('word_counts', CountVectorizer(
-            analyzer='word', max_features=5000,
-            ngram_range=(1, 2), binary=True
-        )),
+    text_feats = FeatureUnion([
+        ('wtf',  TfidfVectorizer(analyzer='word', stop_words='english',
+                                 max_features=12000, ngram_range=(1,3), sublinear_tf=True)),
+        ('ctf',  TfidfVectorizer(analyzer='char_wb', max_features=8000,
+                                 ngram_range=(3,5), sublinear_tf=True)),
+        ('bow',  CountVectorizer(analyzer='word', max_features=5000,
+                                 ngram_range=(1,2), binary=True)),
     ])
-
-    # ── Classifiers ───────────────────────────────────────────────────────────
-    lr  = LogisticRegression(max_iter=2000, C=2.0, solver='lbfgs', class_weight='balanced')
+    lr  = LogisticRegression(max_iter=2000, C=2.0, class_weight='balanced')
     cnb = ComplementNB(alpha=0.1)
     svm = CalibratedClassifierCV(LinearSVC(max_iter=3000, C=1.5, class_weight='balanced'))
-    gb  = GradientBoostingClassifier(n_estimators=120, max_depth=4, learning_rate=0.1, subsample=0.8)
 
-    # Ensemble on TF-IDF + char n-gram features
-    tfidf_ensemble = Pipeline([
-        ('feat', text_features),
-        ('vote', VotingClassifier(
+    pipe = Pipeline([
+        ('feat', text_feats),
+        ('clf',  VotingClassifier(
             estimators=[('lr', lr), ('cnb', cnb), ('svm', svm)],
-            voting='soft', weights=[3, 1, 2]
-        ))
+            voting='soft', weights=[3, 1, 2]))
     ])
 
+    aug_phish = [
+        "Your PayPal account has been limited. Verify now: http://paypal-secure-login.xyz/verify",
+        "URGENT: Your bank account will be suspended. Click to verify: http://192.168.1.1/bank",
+        "You have won $1,000,000 lottery prize. Send details to claim@lottery-win.tk",
+        "Dear customer, unusual activity detected. Login: http://amaz0n-accounts.top",
+        "IRS NOTICE: You owe back taxes. Call immediately or face arrest.",
+        "Your Apple ID is locked. Verify: http://apple-id.secure-verify.click",
+        "Nigerian prince needs help transferring $50 million. Reply urgently.",
+        "Netflix subscription expired! Update payment: http://netflix-billing.online",
+        "CONGRATULATIONS! Selected for $500 Amazon gift card. Claim now!",
+        "Security alert: Someone logged into your Google account. Verify: http://google-security.xyz",
+        "Your crypto wallet needs verification. Enter seed phrase at: http://metamask-verify.top",
+        "Microsoft account expires today. Reset: http://ms-secure.click",
+        "Package held at customs. Pay $2.99 to release: http://dhl-customs-fee.online",
+        "Your SSN has been suspended. Call SSA fraud dept now.",
+        "BANK ALERT: Card charged $847. Not you? Verify: http://chase-verify.xyz",
+        "Verify your identity now or account will be permanently deleted within 24 hours.",
+        "Click here to claim your free iPhone 14: http://free-prize.tk/iphone",
+        "Your account will be closed unless you re-verify your credentials immediately.",
+        "Dear valued customer, update your billing information to avoid service interruption.",
+        "FedEx: Your package is on hold. Pay delivery fee: http://fedex-delivery.online",
+    ]
+    aug_safe = [
+        "Hey, are we still on for dinner tonight?",
+        "Meeting rescheduled to 3pm, conference room B.",
+        "Thanks for your order! It will arrive in 3-5 business days.",
+        "Your appointment is confirmed for Tuesday at 10am.",
+        "Happy birthday! Hope you have a wonderful day.",
+        "The report is ready for review. I've shared it in the drive.",
+        "Can you pick up some milk on the way home?",
+        "Great work on the presentation today!",
+        "Your verification code is 483920. Do not share this with anyone.",
+        "Reminder: Team standup in 15 minutes.",
+        "The package was delivered to your front door at 2:34 PM.",
+        "Your flight is confirmed. Check-in opens 24 hours before departure.",
+        "Thanks for subscribing! Your first invoice is attached.",
+        "The doctor will see you at 3pm on Thursday.",
+    ]
+
+    status = "Lightweight model (no dataset)"
     if os.path.exists('sms_spam_10000_dataset.csv'):
         try:
             df = pd.read_csv('sms_spam_10000_dataset.csv')
             if 'Category' in df.columns and 'Message' in df.columns:
-                X, y_raw = df['Message'].astype(str), df['Category']
+                X_df, y_raw = df['Message'].astype(str), df['Category']
             elif 'v1' in df.columns and 'v2' in df.columns:
-                X, y_raw = df['v2'].astype(str), df['v1']
+                X_df, y_raw = df['v2'].astype(str), df['v1']
             else:
-                return None, "Column names not recognised."
-
-            y = y_raw.apply(lambda v: 1 if str(v).strip().lower() == 'spam' else 0)
-
-            # Augment with hard phishing examples so model isn't just spam-trained
-            aug_phishing = [
-                "Your PayPal account has been limited. Verify now: http://paypal-secure-login.xyz/verify",
-                "URGENT: Your bank account will be suspended. Click here to verify: http://192.168.1.1/bank",
-                "You have won $1,000,000 lottery prize. Send your details to claim@lottery-win.tk",
-                "Dear customer, unusual activity detected. Login here immediately: http://amaz0n-accounts.top",
-                "IRS NOTICE: You owe back taxes. Call 1-800-xxx-xxxx immediately or face arrest.",
-                "Your Apple ID is locked. Verify your information: http://apple-id.secure-verify.click",
-                "Hi, I'm a Nigerian prince and need your help transferring $50 million. Contact me urgently.",
-                "Your Netflix subscription has expired! Update payment: http://netflix-billing.online/update",
-                "CONGRATULATIONS! You've been selected for a $500 Amazon gift card. Claim now!",
-                "Security alert: Someone logged into your Google account. Verify: http://google-security.xyz",
-                "Your crypto wallet needs verification. Enter seed phrase at: http://metamask-verify.top",
-                "Final notice: Your Microsoft account password expires today. Reset: http://ms-secure.click",
-                "Package held at customs. Pay $2.99 to release: http://dhl-customs-fee.online",
-                "Your social security number has been suspended. Call SSA fraud dept now: 1-800-xxx",
-                "BANK ALERT: Card ending 4242 charged $847. Not you? Click: http://chase-verify.xyz",
-            ]
-            aug_safe = [
-                "Hey, are we still on for dinner tonight?",
-                "Meeting rescheduled to 3pm, conference room B.",
-                "Thanks for your order! It will arrive in 3-5 business days.",
-                "Your appointment is confirmed for Tuesday at 10am.",
-                "Happy birthday! Hope you have a wonderful day.",
-                "The report is ready for review. I've shared it in the drive.",
-                "Can you pick up some milk on the way home?",
-                "Great work on the presentation today!",
-                "Your verification code is 483920. Do not share this with anyone.",
-                "Reminder: Team standup in 15 minutes.",
-            ]
-
-            X_aug = pd.concat([X, pd.Series(aug_phishing + aug_safe)], ignore_index=True)
-            y_aug = pd.concat([y, pd.Series([1]*len(aug_phishing) + [0]*len(aug_safe))], ignore_index=True)
-
-            tfidf_ensemble.fit(X_aug, y_aug)
-            status_parts.append(f"Trained on {len(X_aug):,} messages")
+                raise ValueError("Unknown columns")
+            y_df = y_raw.apply(lambda v: 1 if str(v).strip().lower()=='spam' else 0)
+            X_all = pd.concat([X_df, pd.Series(aug_phish+aug_safe)], ignore_index=True)
+            y_all = pd.concat([y_df, pd.Series([1]*len(aug_phish)+[0]*len(aug_safe))], ignore_index=True)
+            pipe.fit(X_all, y_all)
+            status = f"Trained on {len(X_all):,} messages"
         except Exception as e:
-            return None, f"Training error: {e}"
+            X_s = pd.Series(aug_phish+aug_safe)
+            y_s = pd.Series([1]*len(aug_phish)+[0]*len(aug_safe))
+            pipe.fit(X_s, y_s)
     else:
-        # Train on augmented synthetic data only
-        synthetic_spam = [
-            "URGENT: Your account has been compromised. Verify immediately at http://secure-login.xyz",
-            "Congratulations! You won $500 Amazon gift card. Click to claim now!",
-            "Your PayPal is limited. Confirm your details: http://paypal-verify.top",
-            "ALERT: Suspicious login on your bank account. Verify now or account will be closed.",
-            "You owe back taxes to the IRS. Call immediately or face legal action.",
-            "Your Apple ID locked. Update your information: http://apple-id-verify.click",
-            "Nigerian prince needs your help. $50 million transfer. Reply urgently.",
-            "Netflix billing failed! Update payment info or lose access: http://netflix-update.online",
-            "FREE iPhone 14! You've been selected. Claim your prize: http://free-iphone.tk",
-            "Your crypto wallet detected unusual activity. Verify seed phrase at: http://metamask.top",
-            "Microsoft account suspended. Login at http://microsoft-secure.xyz to restore.",
-            "DHL: Package held. Pay customs fee $2.99: http://dhl-package.online",
-            "Your SSN has been suspended. Call SSA fraud department immediately.",
-            "Bank: Card charged $847. Dispute at http://chase-verify.club",
-            "Winner! $1,000,000 sweepstakes prize. Send details to claim@prize.ml",
-        ]
-        synthetic_ham = [
-            "See you at the meeting tomorrow at 9am",
-            "Can you send me the report by Friday?",
-            "Happy birthday! Hope you have a great day",
-            "Your order has shipped and will arrive Thursday",
-            "Reminder: Doctor appointment at 2pm on Wednesday",
-            "Thanks for dinner last night, it was great!",
-            "The project deadline has been moved to next Monday",
-            "Please review the attached document and give feedback",
-            "Your reservation is confirmed for Saturday, 7pm",
-            "Call me when you get a chance, nothing urgent",
-        ]
-        X_syn = pd.Series(synthetic_spam + synthetic_ham)
-        y_syn = pd.Series([1]*len(synthetic_spam) + [0]*len(synthetic_ham))
-        tfidf_ensemble.fit(X_syn, y_syn)
-        status_parts.append("Heuristic + lightweight model (no dataset found)")
+        X_s = pd.Series(aug_phish+aug_safe)
+        y_s = pd.Series([1]*len(aug_phish)+[0]*len(aug_safe))
+        pipe.fit(X_s, y_s)
 
-    return tfidf_ensemble, " · ".join(status_parts)
+    return pipe, status
 
 model, model_status = build_model()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4 ── HEURISTIC TEXT ANALYSIS ENGINE
+# 3.  TEXT / MESSAGE ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
-
 TEXT_RULES = [
-    # (regex, weight 1-5, short_name, explanation)
-    (r'\b(urgent|act now|immediately|expires? (today|now|soon)|respond (now|immediately)|don\'t delay|asap)\b',
-     4, "Urgency / Pressure",
-     "Phishing relies on making you act before you think. Words like 'urgent' or 'expires today' are psychological pressure tactics designed to bypass your rational judgment."),
+    (r'\b(urgent|act now|immediately|expires? (today|soon|now)|respond (now|immediately)|asap|don\'t delay)\b',
+     4, "Urgency / Pressure Tactic",
+     "Phishing messages manufacture a false sense of urgency to make you act before thinking. "
+     "'Urgent', 'expires today', and 'act now' are psychological pressure tools."),
 
     (r'\b(your account (will be|has been|is|was) (suspended|blocked|locked|disabled|terminated|compromised|hacked))\b',
      5, "Account Threat Language",
-     "Threatening account suspension or compromise is the #1 fear-based phishing tactic. Legitimate companies send formal notices by post — not threatening SMS/emails."),
+     "Threatening account suspension is the #1 fear-based phishing tactic. "
+     "Real companies send formal notices by post — not panicked SMS/emails demanding instant action."),
 
     (r'\b(verify|confirm|validate|update|re-?verify) (your )?(account|identity|information|details|password|card|billing)\b',
-     4, "Verification Request",
-     "Legitimate services NEVER ask you to verify sensitive account details through a link in a message. Always go directly to the official website."),
+     4, "Fake Verification Request",
+     "Legitimate services NEVER ask you to verify sensitive data via a link in a message. "
+     "Always navigate to the official website yourself — never through a link."),
 
-    (r'\b(won|winner|selected|awarded|prize|lottery|jackpot|sweepstake|congratulations.*you|you.*won)\b',
+    (r'\b(won|winner|selected|awarded|prize|lottery|jackpot|congratulations.*you|you.*won|sweepstake)\b',
      4, "Prize / Lottery Bait",
-     "Fake prize notifications are a classic social engineering technique. Real lotteries require you to enter — you cannot win one you didn't enter."),
-
-    (r'(\$[\d,]+\s*(million|thousand|hundred)?|\d{4,}[\s]*(dollars?|usd|gbp|eur))',
-     3, "Large Financial Amount",
-     "Unexpectedly large money amounts in messages are bait. Advance-fee fraud promises huge sums to steal small upfront 'processing fees'."),
+     "You cannot win a lottery you never entered. Fake prize notifications are a classic "
+     "lure to collect personal details or redirect you to malicious pages."),
 
     (r'\b(click|tap|open|follow|visit)\s+(this\s+)?(link|url|below|here|button)\b',
-     3, "Suspicious CTA Link",
-     "Directing you to click an unverified link is the primary phishing delivery mechanism. The real destination is hidden behind a redirect."),
+     3, "Suspicious Link Call-to-Action",
+     "Directing you to click an unverified link is the primary phishing delivery method. "
+     "The real destination is often hidden behind a redirect or URL shortener."),
 
     (r'\b(password|passwd|pin\b|otp|one.?time.?pass|verification code|security code|access code)\b',
-     5, "Password / OTP Request",
-     "No legitimate service will ever ask for your password, PIN, or OTP via SMS or email. This is an absolute red line."),
+     5, "OTP / Password Request",
+     "No legitimate service will EVER ask for your password, PIN, or OTP via SMS or email. "
+     "This is an absolute red line and always indicates fraud."),
 
-    (r'\b(credit card|debit card|card number|cvv|expiry date|billing info|full card)\b',
+    (r'\b(credit card|debit card|card number|cvv|expiry date|billing info|full card details)\b',
      5, "Card Details Request",
-     "Requesting card details (number, CVV, expiry) in a message is always fraudulent. Legitimate companies process payments on secure, verified pages."),
+     "Requesting card number, CVV, or expiry via a message is always fraudulent. "
+     "Real companies process payments only on secure, verified checkout pages."),
 
     (r'\b(social security|ssn|national insurance|passport number|driver.?s? licen[sc]e)\b',
      5, "Government ID Request",
-     "Requesting government ID numbers (SSN, passport) via message is a strong indicator of identity theft fraud."),
+     "Requesting government ID numbers via message is a strong indicator of identity theft fraud. "
+     "No agency or service legitimately does this."),
 
-    (r'\b(transfer|wire|send)\s+.{0,20}(bitcoin|btc|ethereum|eth|crypto|gift card|itunes|google play|steam)\b',
-     5, "Crypto / Gift Card Payment",
-     "Asking for payment in gift cards or cryptocurrency is the #1 scam payment method because it is untraceable and irreversible. The IRS, police, and utilities will NEVER ask this."),
+    (r'\b(transfer|wire|send|pay).{0,20}(bitcoin|btc|ethereum|eth|crypto|gift card|itunes|google play|steam)\b',
+     5, "Crypto / Gift Card Payment Demand",
+     "Demanding payment in gift cards or crypto is the #1 scammer payment method — "
+     "untraceable and irreversible. No government, utility, or bank ever asks for this."),
 
-    (r'\b(nigerian?|prince|inheritance|diplomat|refugee|widow|dying|terminal illness).{0,40}(million|transfer|fund)\b',
+    (r'\b(nigerian?|prince|inheritance|diplomat|refugee|widow|dying|terminal).{0,40}(million|transfer|fund|help)\b',
      5, "Advance-Fee Fraud (419 Scam)",
-     "This matches the classic advance-fee fraud pattern originating from Nigeria (419 scams). The goal is to extract small 'processing fees' with promise of large returns."),
+     "Classic advance-fee fraud pattern. The goal is to extract small 'processing fees' "
+     "with a promise of large returns that never materialise."),
 
     (r'\b(dear\s+(customer|user|member|account holder|client|valued|sir|madam|friend))\b',
      2, "Generic Impersonal Greeting",
-     "Phishing messages use generic greetings because they are sent in bulk. Legitimate services address you by your actual name."),
+     "Phishing messages use generic greetings ('Dear Customer') because they are blasted in bulk. "
+     "Legitimate services address you by your real name."),
 
-    (r'\b(legal action|arrest|sued|warrant|court order|fined|prosecuted|reported to police)\b',
+    (r'\b(legal action|arrest|sued|warrant|court order|fined|prosecuted|reported to police|law enforcement)\b',
      4, "Legal Threat / Intimidation",
-     "Threatening legal action or arrest is a scare tactic. Government agencies initiate contact by official post, not by SMS or email."),
-
-    (r'\b(re-?activate|re-?enable|restore access|re-?verify|recover your account)\b',
-     3, "Account Reactivation Scam",
-     "Fake reactivation requests drive you to credential-harvesting pages that look identical to real login pages."),
-
-    (r'\b(unsubscribe|opt.?out|stop receiving|manage preferences)\b',
-     1, "Unsubscribe Footer",
-     "Presence of an unsubscribe notice suggests bulk/marketing communication — often used in phishing emails to appear legitimate."),
-
-    (r'\b(tracking (number|id|code)|your (order|package|parcel|shipment) (is|has))\b',
-     2, "Fake Shipment Notification",
-     "Fake parcel delivery notifications are common phishing lures, especially impersonating FedEx, UPS, USPS, and DHL."),
+     "Threatening arrest or legal action is a scare tactic. "
+     "Government agencies always initiate contact via official postal mail, not SMS or email."),
 
     (r'\b(seed phrase|private key|wallet address|connect wallet|approve transaction|metamask)\b',
-     5, "Crypto Wallet Phishing",
-     "Asking for a seed phrase or private key will instantly drain your entire crypto wallet. No platform ever needs this."),
+     5, "Crypto Wallet Credential Theft",
+     "Asking for a seed phrase or private key will instantly drain your entire crypto wallet. "
+     "No legitimate platform, wallet, or exchange ever needs this — not once, not ever."),
 
-    (r'\b(invoice|receipt|billing statement|payment (due|failed|declined|overdue))\b',
+    (r'\b(invoice|receipt|billing statement|payment (due|failed|declined|overdue|required))\b',
      2, "Fake Invoice / Payment Alert",
-     "Fake invoice/payment alerts create urgency around non-existent debts to harvest payment details."),
+     "Fake invoice or payment-failed alerts create urgency around non-existent debts "
+     "to harvest payment details or redirect to phishing pages."),
+
+    (r'\b(tracking (number|id|code)|your (order|package|parcel|shipment) (is|has|was))\b',
+     2, "Fake Shipment / Delivery Notice",
+     "Fake parcel delivery notifications are a top phishing lure, especially impersonating "
+     "FedEx, DHL, UPS, and USPS. Always check deliveries on the carrier's official site."),
+
+    (r'\b(re-?activate|re-?enable|restore access|recover your account|re-?verify)\b',
+     3, "Account Reactivation Scam",
+     "Fake reactivation requests drive you to credential-harvesting pages that look "
+     "pixel-perfect to real login pages — but steal everything you type."),
+
+    (r'\b(unsubscribe|opt.?out|stop receiving|manage (your )?preferences)\b',
+     1, "Mass-Mail Footer",
+     "An unsubscribe footer suggests bulk communication — commonly used in phishing emails "
+     "to mimic legitimate newsletters and bypass spam filters."),
+
+    (r'\b(download|install|update|run).{0,20}(app|software|tool|attachment|file|exe|apk)\b',
+     4, "Malicious Download Prompt",
+     "Prompting you to download or install something from a link in a message is a "
+     "classic malware delivery technique. Only install software from official stores."),
 ]
 
-def analyze_message_heuristic(text: str):
-    tl = text.lower()
-    hits = []
-    total_weight = 0
-    for pattern, weight, name, explanation in TEXT_RULES:
-        if re.search(pattern, tl, re.I):
-            hits.append((weight, name, explanation))
-            total_weight += weight
-    max_possible = sum(w for w, *_ in TEXT_RULES)
-    score = min(int((total_weight / max(max_possible, 1)) * 100 * 3.2), 100)
-    return score, hits
-
 def analyze_message(text: str):
-    h_score, hits = analyze_message_heuristic(text)
+    tl = text.lower()
+    hits, tw = [], 0
+    for pat, w, name, expl in TEXT_RULES:
+        if re.search(pat, tl, re.I):
+            hits.append((w, name, expl))
+            tw += w
+    max_w = sum(r[1] for r in TEXT_RULES)
+    h_score = min(int((tw / max(max_w,1)) * 100 * 3.5), 100)
 
     ml_score = 0
     if model:
         try:
-            prob = model.predict_proba([text])[0][1]
-            ml_score = int(prob * 100)
-        except:
-            ml_score = 0
+            ml_score = int(model.predict_proba([text])[0][1] * 100)
+        except: pass
 
-    # Weighted blend
-    if model:
-        final = int(0.55 * ml_score + 0.45 * h_score)
-    else:
-        final = h_score
+    final = int(0.55*ml_score + 0.45*h_score) if model else h_score
+    crit = sum(1 for h in hits if h[0] == 5)
+    final = min(final + 12*crit, 100)
 
-    # Boost for critical patterns (password, OTP, SSN, crypto)
-    critical = [h for h in hits if h[0] == 5]
-    if critical:
-        final = min(final + 15 * len(critical), 100)
-
-    final = min(final, 100)
-
-    if final >= 65:   level = "PHISHING"
-    elif final >= 35: level = "SUSPICIOUS"
-    else:             level = "SAFE"
-
+    level = "PHISHING" if final>=65 else ("SUSPICIOUS" if final>=35 else "SAFE")
     return ml_score, h_score, final, level, hits
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 5 ── URL ANALYSIS ENGINE (13 signals + homoglyph + entropy)
+# 4.  URL ANALYSIS  (17 signals)
 # ══════════════════════════════════════════════════════════════════════════════
+def _entropy(s):
+    if not s: return 0.0
+    c = Counter(s); n = len(s)
+    return -sum((v/n)*math.log2(v/n) for v in c.values())
 
-def _normalize_homoglyphs(domain: str) -> str:
-    """Replace common digit/symbol lookalikes with letters."""
-    result = domain
-    for src, dst in HOMOGLYPH_MAP.items():
-        result = result.replace(src, dst)
-    return result
-
-def _domain_entropy(domain: str) -> float:
-    if not domain: return 0.0
-    counts = Counter(domain)
-    total = len(domain)
-    return -sum((c/total)*math.log2(c/total) for c in counts.values())
-
-def _levenshtein(a: str, b: str) -> int:
-    if len(a) < len(b): a, b = b, a
+def _levenshtein(a, b):
+    if len(a)<len(b): a,b = b,a
     prev = list(range(len(b)+1))
-    for i, ca in enumerate(a):
-        curr = [i+1]
-        for j, cb in enumerate(b):
-            curr.append(min(prev[j]+(ca!=cb), curr[-1]+1, prev[j+1]+1))
-        prev = curr
+    for i,ca in enumerate(a):
+        cur=[i+1]
+        for j,cb in enumerate(b):
+            cur.append(min(prev[j]+(ca!=cb), cur[-1]+1, prev[j+1]+1))
+        prev=cur
     return prev[-1]
 
-def _closest_brand(domain: str) -> tuple:
-    """Returns (brand, distance) for the most similar brand name."""
-    best, best_d = None, 999
-    for brand in BRAND_NAMES:
-        d = _levenshtein(domain.lower(), brand.lower())
-        if d < best_d:
-            best, best_d = brand, d
-    return best, best_d
+def analyze_url(raw: str):
+    url = raw.strip()
+    if not url.startswith(('http://','https://')):
+        url = 'https://'+url
+    ext    = tldextract.extract(url)
+    domain = ext.domain.lower()
+    suffix = ext.suffix.lower()
+    sub    = ext.subdomain.lower()
+    parsed = urlparse(url)
+    path   = parsed.path.lower()
+    query  = parsed.query.lower()
+    full   = url.lower()
+    try: decoded = unquote(url).lower()
+    except: decoded = full
 
-URL_RULES = []  # populated dynamically in analyze_url
+    score, flags = 0, []
 
-def analyze_url(raw_url: str):
-    url = raw_url.strip()
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-
-    ext     = tldextract.extract(url)
-    domain  = ext.domain.lower()
-    suffix  = ext.suffix.lower()
-    sub     = ext.subdomain.lower()
-    parsed  = urlparse(url)
-    path    = parsed.path.lower()
-    query   = parsed.query.lower()
-    full    = url.lower()
-
-    # Decode URL encoding
-    try:
-        decoded = unquote(url).lower()
-    except:
-        decoded = full
-
-    score = 0
-    flags = []  # list of (severity 1-5, name, explanation)
-
-    # ── 0. Whitelist ─────────────────────────────────────────────────────────
-    clean_sub = sub.replace('www', '').replace('.', '').strip()
+    # Whitelist
+    clean_sub = sub.replace('www','').replace('.','').strip()
     if domain in WHITELIST and not clean_sub:
-        return 0, "SAFE", [(0, "Verified Trusted Domain", "This domain is on the verified whitelist of major legitimate services.")]
+        return 0, "SAFE", [(0,"Verified Trusted Domain","On the verified whitelist of major legitimate services.")]
 
-    # ── 1. IP Address as host ────────────────────────────────────────────────
+    # 1. IP as host
     if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", parsed.netloc.split(':')[0]):
-        score += 90
-        flags.append((5, "IP Address Used as Domain",
-            f"The URL uses a raw IP address ({parsed.netloc}) instead of a domain name. "
-            "Legitimate websites always use proper domain names. IPs are used to hide the server's identity."))
+        score+=90; flags.append((5,"IP Address as Domain",
+            f"Uses raw IP ({parsed.netloc}) instead of a domain name. "
+            "Legitimate websites never use raw IPs. This is used to hide the server identity."))
 
-    # ── 2. No HTTPS ──────────────────────────────────────────────────────────
-    if parsed.scheme == 'http':
-        score += 20
-        flags.append((3, "Unencrypted HTTP Connection",
-            "The link uses HTTP, not HTTPS. All legitimate websites handling accounts, "
-            "logins, or payments exclusively use HTTPS to encrypt your data in transit."))
+    # 2. No HTTPS
+    if parsed.scheme=='http':
+        score+=20; flags.append((3,"No HTTPS Encryption",
+            "Uses HTTP — unencrypted. Every site handling accounts or payments "
+            "must use HTTPS. Absence of it is a strong warning sign."))
 
-    # ── 3. Brand in subdomain (impersonation) ────────────────────────────────
-    for brand in BRAND_NAMES:
-        if brand in sub and domain not in WHITELIST:
-            score += 70
-            flags.append((5, f"Brand Name '{brand.title()}' Impersonated in Subdomain",
-                f"The subdomain contains '{brand}' but the real domain is '{domain}.{suffix}'. "
-                f"In a URL like 'paypal.evil.com', the actual website is evil.com — not PayPal. "
-                "This is the most common phishing technique."))
-            break
+    # 3. Brand in subdomain
+    for b in BRAND_NAMES:
+        if b in sub and domain not in WHITELIST:
+            score+=70; flags.append((5,f"'{b.title()}' Impersonated in Subdomain",
+                f"Subdomain contains '{b}' but real domain is '{domain}.{suffix}'. "
+                f"In 'paypal.evil.com' the real site is evil.com — NOT PayPal. "
+                "This is the most common phishing technique.")); break
 
-    # ── 4. Homoglyph / typosquatting detection ───────────────────────────────
-    norm_domain = _normalize_homoglyphs(domain)
-    if norm_domain != domain:
-        for brand in BRAND_NAMES:
-            if brand in norm_domain and domain not in WHITELIST:
-                score += 65
-                flags.append((5, "Homoglyph / Character Substitution Attack",
-                    f"The domain '{domain}' uses character substitutions (e.g. '0' for 'o', '1' for 'l') "
-                    f"to impersonate '{norm_domain}'. This is designed to fool visual inspection."))
-                break
+    # 4. Homoglyph substitution
+    norm = ''.join(HOMOGLYPH.get(c,c) for c in domain)
+    if norm != domain:
+        for b in BRAND_NAMES:
+            if b in norm and domain not in WHITELIST:
+                score+=65; flags.append((5,"Homoglyph / Character Substitution",
+                    f"'{domain}' uses lookalike characters (0→o, 1→l, @→a) to impersonate "
+                    f"'{norm}'. Designed to fool visual inspection.")); break
 
-    # ── 5. Levenshtein typosquatting ─────────────────────────────────────────
-    best_brand, dist = _closest_brand(domain)
+    # 5. Typosquatting (Levenshtein)
+    best, dist = None, 999
+    for b in BRAND_NAMES:
+        d = _levenshtein(domain, b)
+        if d < dist: best, dist = b, d
     if 0 < dist <= 2 and domain not in WHITELIST and len(domain) > 3:
-        score += 55
-        flags.append((4, f"Typosquatting — Resembles '{best_brand.title()}'",
-            f"The domain '{domain}' is only {dist} character(s) away from '{best_brand}'. "
-            "Attackers register near-identical domains (e.g. 'amazzon.com', 'paypa1.com') to trick users."))
+        score+=55; flags.append((4,f"Typosquatting — Close to '{best.title()}'",
+            f"'{domain}' is only {dist} character(s) from '{best}'. "
+            "Attackers register near-identical domains (amazzon.com, paypa1.com) to trick users."))
 
-    # ── 6. Subdomain count ───────────────────────────────────────────────────
-    sub_parts = [p for p in sub.split('.') if p and p != 'www']
+    # 6. Excess subdomains
+    sub_parts = [p for p in sub.split('.') if p and p!='www']
     if len(sub_parts) >= 3:
-        score += 35
-        flags.append((3, f"Excessive Subdomains ({len(sub_parts)} levels)",
-            f"Found subdomain: '{sub}'. Having 3+ levels of subdomains (e.g. login.secure.payment.site.com) "
-            "is a tactic to make fake URLs appear official by burying the real domain at the end."))
+        score+=35; flags.append((3,f"Excessive Subdomains ({len(sub_parts)} levels)",
+            f"Subdomain: '{sub}'. 3+ levels of subdomains buries the real domain at the end, "
+            "making fake URLs look official."))
 
-    # ── 7. @ symbol ──────────────────────────────────────────────────────────
+    # 7. @ symbol
     if '@' in url:
-        score += 90
-        flags.append((5, "'@' Symbol in URL (Credential Hijack)",
-            "Browsers ignore everything before '@' in a URL. "
-            "So 'http://paypal.com@evil.com' actually loads evil.com. This is a direct browser exploit."))
+        score+=90; flags.append((5,"'@' Symbol in URL",
+            "Browsers ignore everything before '@'. So 'paypal.com@evil.com' actually loads evil.com. "
+            "This is a direct browser credential-hijack exploit."))
 
-    # ── 8. Suspicious TLD ────────────────────────────────────────────────────
+    # 8. Bad TLD
     if suffix in BAD_TLDS:
-        score += 45
-        flags.append((3, f"High-Risk Top-Level Domain (.{suffix})",
-            f"The '.{suffix}' TLD is widely used for free/throwaway domains. "
-            "It appears disproportionately often in phishing, malware, and spam campaigns due to low/zero registration cost."))
+        score+=45; flags.append((3,f"High-Risk TLD (.{suffix})",
+            f"'.{suffix}' is widely used for free/throwaway domains and appears "
+            "disproportionately in phishing, malware, and spam due to zero/low registration cost."))
 
-    # ── 9. Excessive hyphens ─────────────────────────────────────────────────
-    hyph = domain.count('-')
-    if hyph >= 2:
-        score += min(15 + hyph * 8, 40)
-        flags.append((2, f"Excessive Hyphens in Domain ({hyph})",
-            f"Domain: '{domain}' contains {hyph} hyphens. Phishing domains use hyphens to appear legitimate "
-            "(e.g. 'paypal-secure-verify-account.com'). Legitimate brands rarely have hyphens."))
+    # 9. Hyphens
+    h = domain.count('-')
+    if h >= 2:
+        score+=min(15+h*8,40); flags.append((2,f"Excessive Hyphens in Domain ({h})",
+            f"'{domain}' has {h} hyphens. Phishing domains use hyphens to appear official "
+            "(e.g. paypal-secure-verify-account.com)."))
 
-    # ── 10. Long URL ─────────────────────────────────────────────────────────
+    # 10. Long URL
     if len(url) > 85:
-        score += 18
-        flags.append((2, f"Unusually Long URL ({len(url)} chars)",
-            "Very long URLs are constructed to hide the real domain (usually at the start) "
-            "in a wall of confusing parameters, making it hard to see where the link actually goes."))
+        score+=18; flags.append((2,f"Very Long URL ({len(url)} chars)",
+            "Long URLs bury the real domain in walls of confusing parameters "
+            "to prevent the recipient from seeing where the link actually goes."))
 
-    # ── 11. Sensitive keywords in path/query ─────────────────────────────────
-    sensitive = ['login','verify','account','update','secure','confirm','password',
-                 'banking','signin','credential','validate','wallet','payment','recover',
-                 'authenticate','billing','otp','pin','reset','access']
-    found_kw = [kw for kw in sensitive if kw in path or kw in query]
-    if found_kw:
-        score += 25
-        flags.append((3, f"Sensitive Keywords in URL Path: {', '.join(found_kw[:4])}",
-            "Legitimate sites do not typically place action keywords like 'login', 'verify', or 'password' "
-            "directly in their URL paths. Phishing pages mimic real login/verification pages."))
+    # 11. Sensitive keywords
+    kws = ['login','verify','account','update','secure','confirm','password',
+           'banking','signin','credential','validate','wallet','payment','recover',
+           'authenticate','billing','otp','pin','reset','access']
+    found = [k for k in kws if k in path or k in query]
+    if found:
+        score+=25; flags.append((3,f"Sensitive Keywords in Path: {', '.join(found[:4])}",
+            "Legitimate sites rarely place action words like 'login', 'verify', or 'password' "
+            "directly in URL paths. Phishing pages do this to mimic real login/verification flows."))
 
-    # ── 12. High digit ratio in domain ──────────────────────────────────────
-    digit_r = sum(c.isdigit() for c in domain) / max(len(domain), 1)
-    if digit_r > 0.35:
-        score += 30
-        flags.append((3, f"High Digit Ratio in Domain ({int(digit_r*100)}%)",
-            f"Domain '{domain}' is {int(digit_r*100)}% digits. Auto-generated phishing domains "
-            "often contain random numbers as filler to avoid detection."))
+    # 12. Digit ratio
+    dr = sum(c.isdigit() for c in domain) / max(len(domain),1)
+    if dr > 0.35:
+        score+=30; flags.append((3,f"High Digit Ratio in Domain ({int(dr*100)}%)",
+            f"'{domain}' is {int(dr*100)}% digits. Auto-generated phishing domains "
+            "use random numbers to avoid detection and blocklists."))
 
-    # ── 13. Open redirect ────────────────────────────────────────────────────
-    redirect_params = ['redirect', 'url=', 'goto=', 'next=', 'return=', 'returnurl', 'dest=', 'forward=']
-    if any(p in full for p in redirect_params):
-        score += 35
-        flags.append((4, "Open Redirect Parameter Detected",
-            "The URL contains a redirect parameter (e.g. '?url=' or '?goto='). This allows attackers "
-            "to chain URLs — the first link appears safe but silently forwards you to a malicious page."))
+    # 13. Open redirect
+    if any(p in full for p in ['redirect=','url=','goto=','next=','return=','dest=','forward=']):
+        score+=35; flags.append((4,"Open Redirect Parameter",
+            "Contains a redirect parameter (?url=, ?goto=). This lets attackers chain URLs — "
+            "the first link looks safe but silently forwards to a malicious page."))
 
-    # ── 14. URL shortener ────────────────────────────────────────────────────
-    shorteners = ['bit.ly','tinyurl','t.co','goo.gl','ow.ly','buff.ly','rebrand.ly',
-                  'short.link','rb.gy','cutt.ly','tiny.cc','is.gd','v.gd','snip.ly']
+    # 14. URL shortener
+    shorteners = ['bit.ly','tinyurl','t.co','goo.gl','ow.ly','buff.ly',
+                  'short.link','rb.gy','cutt.ly','tiny.cc','is.gd','v.gd']
     if any(s in full for s in shorteners):
-        score += 30
-        flags.append((3, "URL Shortener Detected",
-            "URL shorteners hide the final destination. Phishing links are frequently disguised using "
-            "services like bit.ly or tinyurl to bypass link scanners and fool recipients."))
+        score+=30; flags.append((3,"URL Shortener Detected",
+            "Shorteners hide the final destination. Phishing links are frequently disguised "
+            "with bit.ly, tinyurl etc. to bypass link scanners."))
 
-    # ── 15. High domain entropy (randomness) ─────────────────────────────────
-    ent = _domain_entropy(domain)
+    # 15. Domain entropy (DGA)
+    ent = _entropy(domain)
     if ent > 3.7 and len(domain) > 8:
-        score += 25
-        flags.append((3, f"High Domain Randomness (entropy {ent:.2f})",
-            f"The domain '{domain}' has a high character entropy score of {ent:.2f}, indicating it may be "
-            "algorithmically generated (DGA — Domain Generation Algorithm), common in phishing and malware."))
+        score+=25; flags.append((3,f"High Domain Entropy ({ent:.2f}) — Possible DGA",
+            f"Entropy {ent:.2f} suggests algorithmically generated domain (Domain Generation Algorithm), "
+            "common in phishing, botnet C2, and malware infrastructure."))
 
-    # ── 16. Mixed unicode / punycode ─────────────────────────────────────────
-    if 'xn--' in domain.lower() or any(ord(c) > 127 for c in raw_url):
-        score += 50
-        flags.append((4, "Punycode / Unicode Domain (IDN Homograph Attack)",
-            "The domain uses Unicode or punycode (xn--...). Attackers register domains with characters from "
-            "other alphabets that look identical to Latin letters (e.g. Cyrillic 'а' vs Latin 'a') "
-            "to create visually indistinguishable fake domains."))
+    # 16. Punycode / IDN
+    if 'xn--' in domain or any(ord(c)>127 for c in raw):
+        score+=50; flags.append((4,"Punycode / Unicode Domain (IDN Homograph Attack)",
+            "Uses Unicode or punycode (xn--). Attackers register domains with Cyrillic/Greek "
+            "characters that look identical to Latin letters — visually indistinguishable fakes."))
 
-    # ── 17. Encoded characters in path ───────────────────────────────────────
-    if re.search(r'%[0-9a-fA-F]{2}', path) and decoded != full:
-        score += 20
-        flags.append((2, "URL Encoding Used to Obfuscate Path",
-            "The URL path contains percent-encoded characters (e.g. %2F, %40). "
-            "While sometimes legitimate, this is frequently used to evade content filters and hide malicious paths."))
+    # 17. URL encoding obfuscation
+    if re.search(r'%[0-9a-fA-F]{2}', path):
+        score+=20; flags.append((2,"URL Encoding in Path",
+            "Percent-encoded characters (%2F, %40) in the path can hide malicious routes "
+            "and evade content filters that scan for keywords."))
 
     score = min(score, 100)
-
-    if score >= 60:   level = "PHISHING"
-    elif score >= 30: level = "SUSPICIOUS"
-    else:             level = "SAFE"
-
+    level = "PHISHING" if score>=60 else ("SUSPICIOUS" if score>=30 else "SAFE")
     if not flags:
-        flags.append((0, "Clean URL Structure",
-            "No suspicious patterns were found. The URL appears structurally clean and standard."))
-
+        flags.append((0,"Clean URL Structure","No suspicious patterns detected. Appears structurally safe."))
     return score, level, flags
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 6 ── CSS (Dark Minimal — Monochrome Terminal Aesthetic)
+# 5.  IMAGE PHISHING ANALYSIS
+#     Works purely on heuristic extraction — no external API needed.
+#     Detects: embedded URLs, suspicious text patterns, QR-code-like data URIs,
+#     and image metadata anomalies.
 # ══════════════════════════════════════════════════════════════════════════════
+def analyze_image(uploaded_file) -> tuple:
+    """
+    Returns (score 0-100, level, list-of-(severity, name, explanation), extracted_urls).
+    Pure heuristic — reads the raw bytes to extract embedded text/URLs.
+    """
+    raw = uploaded_file.read()
+    uploaded_file.seek(0)
+    score, flags, found_urls = 0, [], []
 
+    # Decode bytes to string (ignore non-UTF chars) for pattern matching
+    try:
+        text_repr = raw.decode('latin-1', errors='replace')
+    except:
+        text_repr = str(raw)
+
+    # ── a) Embedded URLs in image data ────────────────────────────────────────
+    url_pat = re.compile(r'https?://[^\s\x00-\x1f\'"<>]{5,}', re.I)
+    raw_urls = url_pat.findall(text_repr)
+    # Clean and deduplicate
+    for u in raw_urls:
+        u_clean = re.sub(r'[^\x20-\x7e]', '', u)[:200]
+        if u_clean and u_clean not in found_urls:
+            found_urls.append(u_clean)
+
+    if found_urls:
+        score += 40
+        flags.append((4, f"Embedded URLs Found ({len(found_urls)})",
+            f"Image contains {len(found_urls)} embedded URL(s). Phishing images embed links "
+            "in their binary data or metadata to bypass text-based spam filters. "
+            f"First URL: {found_urls[0][:80]}"))
+
+    # ── b) Suspicious embedded text patterns ──────────────────────────────────
+    text_lower = text_repr.lower()
+    phish_kw = {
+        'verify': "Contains 'verify' keyword — common in phishing instructions.",
+        'account': "Contains 'account' keyword — phishing images often ask to log in.",
+        'password': "Contains 'password' keyword — embedded credential requests in images.",
+        'click here': "Contains 'click here' — a call-to-action embedded in the image.",
+        'urgent': "Contains 'urgent' — pressure tactic embedded in image text.",
+        'login': "Contains 'login' — credential phishing instruction in image.",
+        'suspended': "Contains 'suspended' — account-threat language in image.",
+        'confirm': "Contains 'confirm' — verification request embedded in image.",
+        'prize': "Contains 'prize' — prize bait embedded in image.",
+        'winner': "Contains 'winner' — lottery/prize bait in image.",
+        'gift card': "Contains 'gift card' — payment scam language in image.",
+        'bitcoin': "Contains 'bitcoin' — crypto fraud language in image.",
+        'seed phrase': "Contains 'seed phrase' — crypto wallet theft attempt in image.",
+    }
+    hit_kw = []
+    for kw, reason in phish_kw.items():
+        if kw in text_lower:
+            hit_kw.append((kw, reason))
+    if hit_kw:
+        score += min(len(hit_kw) * 15, 45)
+        flags.append((3, f"Suspicious Keywords Embedded in Image ({len(hit_kw)})",
+            "Found phishing-related keywords in the image file: " +
+            ", ".join(f"'{k}'" for k,_ in hit_kw[:5]) +
+            ". Attackers embed text directly in images to hide it from text-based filters."))
+
+    # ── c) QR-code-like high-entropy data blocks ──────────────────────────────
+    # Large base64-like blocks can contain hidden payloads
+    b64_blocks = re.findall(r'[A-Za-z0-9+/]{60,}={0,2}', text_repr)
+    if len(b64_blocks) > 5:
+        score += 20
+        flags.append((2, f"Multiple Encoded Data Blocks ({len(b64_blocks)})",
+            f"Image contains {len(b64_blocks)} large encoded data blocks. "
+            "These can hide payloads, embedded scripts, or additional URLs "
+            "that bypass visual inspection."))
+
+    # ── d) Extremely small image (1x1 tracking pixel) ─────────────────────────
+    if len(raw) < 500:
+        score += 50
+        flags.append((4, "Micro Image — Possible Tracking Pixel",
+            f"File is only {len(raw)} bytes. 1×1 pixel tracking images are used "
+            "to confirm email delivery, track when emails are opened, and map your IP address "
+            "without your knowledge."))
+
+    # ── e) File size anomaly (huge image with little visual content) ──────────
+    if len(raw) > 5_000_000:
+        score += 15
+        flags.append((2, f"Unusually Large Image File ({len(raw)//1024//1024} MB)",
+            "Extremely large images can contain hidden zip archives, executables, "
+            "or steganographic payloads embedded inside the image data."))
+
+    # ── f) JPEG/PNG magic byte mismatch (polyglot file) ──────────────────────
+    ext_name = uploaded_file.name.lower().split('.')[-1] if '.' in uploaded_file.name else ''
+    is_jpeg = raw[:2] == b'\xff\xd8'
+    is_png  = raw[:8] == b'\x89PNG\r\n\x1a\n'
+    is_gif  = raw[:6] in (b'GIF87a', b'GIF89a')
+    claimed_img = ext_name in ('jpg','jpeg','png','gif','bmp','webp')
+    actual_img  = is_jpeg or is_png or is_gif
+
+    if claimed_img and not actual_img:
+        score += 60
+        flags.append((5, "File Format Mismatch — Possible Disguised Executable",
+            f"File claims to be '{ext_name}' but does not start with a valid image signature. "
+            "This is a classic technique to disguise malware as an image "
+            "(e.g. malware.exe renamed to photo.jpg)."))
+
+    # ── g) Scan any found URLs through URL engine ─────────────────────────────
+    url_flags_summary = []
+    for u in found_urls[:3]:
+        u_score, u_level, u_flags = analyze_url(u)
+        if u_level in ('PHISHING', 'SUSPICIOUS'):
+            score += min(u_score // 3, 20)
+            url_flags_summary.append(f"{u[:60]}… → {u_level} ({u_score}%)")
+
+    if url_flags_summary:
+        flags.append((5, "Embedded URLs Are Malicious",
+            "URLs found inside this image were scanned and flagged as phishing or suspicious: "
+            + " | ".join(url_flags_summary)))
+
+    score = min(score, 100)
+    level = "PHISHING" if score>=60 else ("SUSPICIOUS" if score>=30 else "SAFE")
+    if not flags:
+        flags.append((0,"No Threats Detected in Image",
+            "No embedded URLs, suspicious keywords, tracking pixels, or format anomalies found."))
+    return score, level, flags, found_urls
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6.  CSS — Clean White Minimal
+# ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body, .stApp {
-    background-color: #080808 !important;
-    color: #d4d4d4 !important;
-    font-family: 'IBM Plex Sans', sans-serif !important;
+    background-color: #ffffff !important;
+    color: #111111 !important;
+    font-family: 'Inter', sans-serif !important;
 }
-#MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 2.5rem 1.5rem 5rem !important; max-width: 740px !important; }
 
-/* ── INPUTS ── */
+/* Hide Streamlit chrome */
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding: 2.5rem 1.8rem 5rem !important; max-width: 760px !important; }
+
+/* ── Inputs ── */
 .stTextInput > div > div > input,
 .stTextArea > div > div > textarea {
-    background-color: #111 !important;
-    border: 1px solid #252525 !important;
-    border-radius: 5px !important;
-    color: #d4d4d4 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.82rem !important;
+    background: #fafafa !important;
+    border: 1.5px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    color: #111 !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.88rem !important;
     padding: 13px 14px !important;
-    transition: border-color 0.2s;
-    caret-color: #d4d4d4;
+    transition: border-color 0.18s;
 }
 .stTextInput > div > div > input:focus,
 .stTextArea > div > div > textarea:focus {
-    border-color: #404040 !important;
+    border-color: #111 !important;
     box-shadow: none !important;
     outline: none !important;
+    background: #fff !important;
 }
 
-/* ── BUTTON ── */
+/* ── Button ── */
 div.stButton > button {
-    background-color: #d4d4d4 !important;
-    color: #080808 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.76rem !important;
+    background: #111 !important;
+    color: #fff !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82rem !important;
     font-weight: 600 !important;
-    letter-spacing: 0.08em !important;
+    letter-spacing: 0.04em !important;
     border: none !important;
-    border-radius: 4px !important;
-    padding: 11px 0 !important;
+    border-radius: 8px !important;
+    padding: 12px 0 !important;
     width: 100% !important;
     transition: background 0.15s, transform 0.1s !important;
 }
-div.stButton > button:hover {
-    background-color: #b8b8b8 !important;
-    transform: translateY(-1px) !important;
+div.stButton > button:hover  { background: #333 !important; transform: translateY(-1px) !important; }
+div.stButton > button:active { transform: translateY(0) !important; }
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    border: 1.5px dashed #d0d0d0 !important;
+    border-radius: 8px !important;
+    background: #fafafa !important;
+    padding: 8px !important;
 }
-div.stButton > button:active {
-    transform: translateY(0) !important;
-}
+[data-testid="stFileUploader"]:hover { border-color: #aaa !important; }
 
-/* ── SPINNER ── */
-.stSpinner { color: #444 !important; }
+/* ── Spinner ── */
+.stSpinner > div { border-top-color: #111 !important; }
 
-/* ── OPTION MENU ── */
-ul[data-testid="stHorizontalBlock"] { display: none !important; }
-
-/* ── ALERT/WARNING ── */
-.stAlert { border-radius: 5px !important; font-family: 'IBM Plex Mono', monospace !important; font-size: 0.78rem !important; }
-
-/* ── SCROLLBAR ── */
+/* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: #111; }
-::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+::-webkit-scrollbar-track { background: #f5f5f5; }
+::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
+
+/* ── Alerts ── */
+.stAlert { border-radius: 8px !important; font-size: 0.83rem !important; font-family: 'Inter',sans-serif !important; }
+
+/* ── Option menu override ── */
+nav[id="option-menu"] { font-family: 'Inter', sans-serif !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 7 ── UI COMPONENTS (rendered via st.markdown)
+# 7.  UI HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+def c_score(score, level):
+    return {
+        "PHISHING":   ("#dc2626","#fef2f2","rgba(220,38,38,0.15)"),
+        "SUSPICIOUS": ("#d97706","#fffbeb","rgba(217,119,6,0.12)"),
+        "SAFE":       ("#16a34a","#f0fdf4","rgba(22,163,74,0.12)"),
+    }.get(level, ("#555","#f9f9f9","rgba(0,0,0,0.05)"))
 
-def render_score_block(score: int, level: str, sub_info: str = ""):
-    if level == "PHISHING":
-        color, bg = "#ff4444", "rgba(255,68,68,0.06)"
-        border = "rgba(255,68,68,0.25)"
-    elif level == "SUSPICIOUS":
-        color, bg = "#ffaa00", "rgba(255,170,0,0.06)"
-        border = "rgba(255,170,0,0.25)"
-    else:
-        color, bg = "#22dd77", "rgba(34,221,119,0.06)"
-        border = "rgba(34,221,119,0.2)"
+SEV_COLOR = {0:"#16a34a",1:"#6b7280",2:"#d97706",3:"#ea580c",4:"#dc2626",5:"#7f1d1d"}
 
-    bar_bg = f"linear-gradient(90deg, {color} {score}%, #1a1a1a {score}%)"
-
+def label(text):
     st.markdown(f"""
-    <div style="
-        border: 1px solid {border};
-        border-radius: 8px;
-        padding: 28px 24px 22px;
-        background: {bg};
-        margin: 18px 0 22px;
-        text-align: center;
-    ">
-        <div style="
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 5rem;
-            font-weight: 300;
-            letter-spacing: -0.05em;
-            color: {color};
-            line-height: 1;
-        ">{score}<span style="font-size:1.8rem; color:#333;">%</span></div>
+    <div style="font-family:'Inter',sans-serif; font-size:0.68rem; font-weight:600;
+        letter-spacing:0.12em; text-transform:uppercase; color:#9ca3af;
+        margin:22px 0 8px; padding-bottom:6px; border-bottom:1px solid #f0f0f0;">
+        {text}
+    </div>""", unsafe_allow_html=True)
 
-        <div style="
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.7rem;
-            letter-spacing: 0.18em;
-            text-transform: uppercase;
-            color: {color};
-            margin-top: 6px;
-            margin-bottom: 14px;
-        ">{level}</div>
-
-        <div style="height:3px; background:{bar_bg}; border-radius:2px; margin-bottom:12px;"></div>
-
-        {f'<div style="font-family:IBM Plex Mono,monospace; font-size:0.68rem; color:#444; letter-spacing:0.05em;">{sub_info}</div>' if sub_info else ''}
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def render_section_label(text: str):
+def score_block(score, level, sub=""):
+    tc, bg, br = c_score(score, level)
+    icons = {"PHISHING":"🚨","SUSPICIOUS":"⚠️","SAFE":"✅"}
     st.markdown(f"""
-    <div style="
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.64rem;
-        letter-spacing: 0.15em;
-        text-transform: uppercase;
-        color: #3a3a3a;
-        margin: 24px 0 10px;
-        padding-bottom: 7px;
-        border-bottom: 1px solid #181818;
-    ">{text}</div>
-    """, unsafe_allow_html=True)
+    <div style="border:1.5px solid {br}; border-radius:12px; padding:28px 24px 22px;
+        background:{bg}; margin:16px 0 22px; text-align:center;">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:4.5rem;
+            font-weight:400; letter-spacing:-0.04em; color:{tc}; line-height:1;">
+            {score}<span style="font-size:1.6rem; color:#ccc;">%</span>
+        </div>
+        <div style="font-family:'Inter',sans-serif; font-size:0.8rem; font-weight:700;
+            letter-spacing:0.12em; text-transform:uppercase; color:{tc}; margin:6px 0 12px;">
+            {icons.get(level,'')} {level}
+        </div>
+        <div style="height:3px; border-radius:2px; margin-bottom:10px;
+            background:linear-gradient(90deg,{tc} {score}%,#e5e7eb {score}%);"></div>
+        {f'<div style="font-family:JetBrains Mono,monospace;font-size:0.67rem;color:#9ca3af;">{sub}</div>' if sub else ''}
+    </div>""", unsafe_allow_html=True)
 
-
-SEVERITY_COLORS = {0: "#22dd77", 1: "#aaaaaa", 2: "#ffaa00", 3: "#ff8800", 4: "#ff5500", 5: "#ff4444"}
-
-def render_flag(severity: int, name: str, explanation: str, is_safe: bool = False):
-    color = SEVERITY_COLORS.get(severity, "#aaa") if not is_safe else "#22dd77"
-    icon  = "✓" if is_safe else ("◉" if severity >= 4 else "◎")
+def flag_card(sev, name, expl, safe=False):
+    color = "#16a34a" if safe else SEV_COLOR.get(sev,"#555")
+    icon  = "✓" if safe else ("◉" if sev>=4 else "◎")
     st.markdown(f"""
-    <div style="
-        border: 1px solid #1c1c1c;
-        border-left: 3px solid {color};
-        border-radius: 0 5px 5px 0;
-        padding: 13px 15px 13px 16px;
-        margin-bottom: 9px;
-        background: #0e0e0e;
-    ">
-        <div style="
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.75rem;
-            color: {color};
-            letter-spacing: 0.03em;
-            margin-bottom: 5px;
-        ">{icon} {name}</div>
-        <div style="
-            font-family: 'IBM Plex Sans', sans-serif;
-            font-size: 0.82rem;
-            color: #666;
-            line-height: 1.55;
-        ">{explanation}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    <div style="border:1px solid #f0f0f0; border-left:3px solid {color};
+        border-radius:0 8px 8px 0; padding:13px 16px; margin-bottom:9px; background:#fafafa;">
+        <div style="font-family:'Inter',sans-serif; font-size:0.78rem; font-weight:600;
+            color:{color}; margin-bottom:5px;">{icon} {name}</div>
+        <div style="font-family:'Inter',sans-serif; font-size:0.82rem;
+            color:#6b7280; line-height:1.55;">{expl}</div>
+    </div>""", unsafe_allow_html=True)
 
-
-def render_safety_card(rec: dict, level: str):
-    if level == "SAFE":
-        return
+def safety_card(rec, level):
+    if level=="SAFE": return
     st.markdown(f"""
-    <div style="
-        border: 1px solid rgba(34,221,119,0.2);
-        border-radius: 8px;
-        padding: 20px 20px 16px;
-        background: rgba(34,221,119,0.04);
-        margin-top: 6px;
-    ">
-        <div style="
-            font-family: 'IBM Plex Mono', monospace;
-            font-size: 0.64rem;
-            letter-spacing: 0.15em;
-            text-transform: uppercase;
-            color: #22dd77;
-            margin-bottom: 14px;
-        ">⬡ Safety Recommendations</div>
-
+    <div style="border:1.5px solid #bbf7d0; border-radius:12px; padding:20px;
+        background:#f0fdf4; margin-top:4px;">
+        <div style="font-family:'Inter',sans-serif; font-size:0.68rem; font-weight:700;
+            letter-spacing:0.12em; text-transform:uppercase; color:#16a34a; margin-bottom:14px;">
+            ✦ What to do instead
+        </div>
         <div style="display:grid; gap:10px;">
-
-            <div style="display:flex; gap:12px; align-items:flex-start;">
-                <span style="font-family:IBM Plex Mono,monospace; font-size:0.68rem; color:#333; min-width:70px; padding-top:1px;">WEBSITE</span>
-                <span style="font-family:IBM Plex Sans,sans-serif; font-size:0.84rem; color:#c8c8c8; line-height:1.4;">{rec['site']}</span>
+            <div style="display:flex; gap:14px; align-items:flex-start;">
+                <span style="font-family:JetBrains Mono,monospace; font-size:0.67rem; font-weight:500;
+                    color:#9ca3af; min-width:68px; padding-top:2px;">WEBSITE</span>
+                <span style="font-size:0.84rem; color:#111; font-weight:500;">{rec['site']}</span>
             </div>
-
-            <div style="display:flex; gap:12px; align-items:flex-start;">
-                <span style="font-family:IBM Plex Mono,monospace; font-size:0.68rem; color:#333; min-width:70px; padding-top:1px;">APP</span>
-                <span style="font-family:IBM Plex Sans,sans-serif; font-size:0.84rem; color:#c8c8c8; line-height:1.4;">{rec['app']}</span>
+            <div style="display:flex; gap:14px; align-items:flex-start;">
+                <span style="font-family:JetBrains Mono,monospace; font-size:0.67rem; font-weight:500;
+                    color:#9ca3af; min-width:68px; padding-top:2px;">APP</span>
+                <span style="font-size:0.84rem; color:#111;">{rec['app']}</span>
             </div>
-
-            <div style="display:flex; gap:12px; align-items:flex-start;">
-                <span style="font-family:IBM Plex Mono,monospace; font-size:0.68rem; color:#333; min-width:70px; padding-top:1px;">CONTACT</span>
-                <span style="font-family:IBM Plex Sans,sans-serif; font-size:0.84rem; color:#c8c8c8; line-height:1.4;">{rec['contact']}</span>
+            <div style="display:flex; gap:14px; align-items:flex-start;">
+                <span style="font-family:JetBrains Mono,monospace; font-size:0.67rem; font-weight:500;
+                    color:#9ca3af; min-width:68px; padding-top:2px;">CONTACT</span>
+                <span style="font-size:0.84rem; color:#111;">{rec['contact']}</span>
             </div>
-
-            <div style="
-                margin-top:4px;
-                padding: 10px 14px;
-                background: rgba(34,221,119,0.07);
-                border-radius: 4px;
-                border-left: 2px solid rgba(34,221,119,0.5);
-            ">
-                <span style="font-family:IBM Plex Mono,monospace; font-size:0.68rem; color:#22dd77; letter-spacing:0.06em;">TIP  </span>
-                <span style="font-family:IBM Plex Sans,sans-serif; font-size:0.82rem; color:#888; line-height:1.5;">{rec['tip']}</span>
+            <div style="margin-top:6px; padding:10px 14px; background:#dcfce7;
+                border-radius:6px; border-left:3px solid #16a34a;">
+                <span style="font-family:JetBrains Mono,monospace; font-size:0.67rem;
+                    font-weight:600; color:#15803d;">TIP  </span>
+                <span style="font-size:0.82rem; color:#166534; line-height:1.5;">{rec['tip']}</span>
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
-
-def render_general_safety_tips():
+def general_tips():
     tips = [
-        ("Never click links in unexpected messages", "If a message creates urgency about your account, go directly to the website by typing it yourself — never through a link."),
-        ("Check the full URL before clicking", "Hover over links. Look at the very last part before the first slash — that's the real domain. Everything before it can be faked."),
-        ("Enable two-factor authentication (2FA)", "Even if your password is stolen, 2FA stops attackers from accessing your account. Use an app (Google Authenticator, Authy) not SMS."),
-        ("Your bank / government will never ask via SMS", "No bank, IRS, Social Security, or government agency will demand urgent action via text or email. Call them on the official number."),
-        ("Report phishing", "Forward phishing SMS to 7726 (SPAM). Report phishing emails to reportphishing@apwg.org or phishing-report@us-cert.gov."),
+        ("🔗  Never click links in unexpected messages",
+         "If a message creates urgency about your account, go directly to the website by typing it yourself. Never use links from SMS or emails."),
+        ("🔍  Inspect the full URL before clicking",
+         "Hover over a link and check the very last domain before the first slash — that's the real destination. Everything before it can be faked."),
+        ("🔐  Enable two-factor authentication (2FA)",
+         "Even if your password is stolen, 2FA blocks access. Use an authenticator app (Google Authenticator, Authy) — not SMS-based 2FA."),
+        ("📞  Call official numbers — not the one they give you",
+         "Your bank, IRS, Apple, and Amazon all have official numbers on their websites. Call those — never the number in the suspicious message."),
+        ("🎁  Gift cards and crypto = scam, always",
+         "No government agency, utility, police department, or legitimate business ever asks for payment via gift cards or cryptocurrency."),
+        ("📧  Report phishing",
+         "Forward phishing SMS to 7726 (SPAM). Report phishing emails to reportphishing@apwg.org or forward to your email provider as junk."),
+        ("🧠  When in doubt — don't",
+         "If something feels off, pause. Real emergencies give you time to verify. If you can't verify the sender independently, don't act."),
     ]
     st.markdown("""
-    <div style="
-        border: 1px solid #1c1c1c;
-        border-radius: 8px;
-        padding: 20px;
-        background: #0b0b0b;
-        margin-top: 6px;
-    ">
-        <div style="font-family:IBM Plex Mono,monospace; font-size:0.64rem; letter-spacing:0.15em; text-transform:uppercase; color:#3a3a3a; margin-bottom:14px;">
-            General Safety Guidelines
+    <div style="border:1.5px solid #f0f0f0; border-radius:12px; padding:20px; background:#fafafa; margin-top:4px;">
+        <div style="font-family:'Inter',sans-serif; font-size:0.68rem; font-weight:700;
+            letter-spacing:0.12em; text-transform:uppercase; color:#9ca3af; margin-bottom:14px;">
+            How to Protect Yourself — General Rules
         </div>
     """, unsafe_allow_html=True)
     for title, detail in tips:
         st.markdown(f"""
-        <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid #161616;">
-            <div style="font-family:IBM Plex Mono,monospace; font-size:0.76rem; color:#888; margin-bottom:3px;">{title}</div>
-            <div style="font-family:IBM Plex Sans,sans-serif; font-size:0.8rem; color:#484848; line-height:1.5;">{detail}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        <div style="padding:10px 0; border-bottom:1px solid #f0f0f0;">
+            <div style="font-size:0.83rem; font-weight:600; color:#374151; margin-bottom:3px;">{title}</div>
+            <div style="font-size:0.8rem; color:#9ca3af; line-height:1.55;">{detail}</div>
+        </div>""", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+def image_phishing_guide():
+    """Educational section: how to spot phishing images."""
+    tips = [
+        ("Blurry or low-res logos",
+         "Phishing images often use stretched, pixelated, or slightly off-colour brand logos. Compare with the real brand's official assets."),
+        ("QR codes in images",
+         "Attackers embed QR codes in images knowing that QR scanners bypass email URL filters. Always inspect QR destinations before visiting."),
+        ("Urgency text overlaid on images",
+         "Text like 'Your account is suspended — scan now' overlaid on a fake brand logo is a hallmark of image-based phishing."),
+        ("Tracking pixels (1×1 invisible images)",
+         "These tiny images silently confirm your email is live and log your IP and device — allowing attackers to refine targeted attacks."),
+        ("Attachments that look like images but aren't",
+         "Files with .jpg or .png extensions can actually be executables or ZIP files. Always scan attachments before opening."),
+    ]
+    st.markdown("""
+    <div style="border:1.5px solid #fef9c3; border-radius:12px; padding:20px;
+        background:#fefce8; margin-top:4px;">
+        <div style="font-family:'Inter',sans-serif; font-size:0.68rem; font-weight:700;
+            letter-spacing:0.12em; text-transform:uppercase; color:#a16207; margin-bottom:14px;">
+            How to Spot Phishing Images
+        </div>
+    """, unsafe_allow_html=True)
+    for t, d in tips:
+        st.markdown(f"""
+        <div style="padding:8px 0; border-bottom:1px solid #fef08a;">
+            <div style="font-size:0.82rem; font-weight:600; color:#713f12; margin-bottom:2px;">⚑ {t}</div>
+            <div style="font-size:0.79rem; color:#92400e; line-height:1.5;">{d}</div>
+        </div>""", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 8 ── APP LAYOUT
+# 8.  APP LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
-
-# Header
 st.markdown("""
-<div style="padding: 1rem 0 2rem; border-bottom: 1px solid #141414; margin-bottom: 2rem;">
-    <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
-        <span style="font-family:IBM Plex Mono,monospace; font-size:1.3rem; color:#d4d4d4; font-weight:600; letter-spacing:-0.02em;">⬡ PhishGuard</span>
-        <span style="font-family:IBM Plex Mono,monospace; font-size:0.62rem; color:#2a2a2a; letter-spacing:0.1em; padding: 2px 8px; border:1px solid #1e1e1e; border-radius:20px;">AI · v3.0</span>
+<div style="padding:0.5rem 0 2rem; border-bottom:1.5px solid #f0f0f0; margin-bottom:2rem;">
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:5px;">
+        <span style="font-family:'Inter',sans-serif; font-size:1.4rem;
+            font-weight:700; color:#111; letter-spacing:-0.03em;">🛡️ PhishGuard AI</span>
+        <span style="font-family:'JetBrains Mono',monospace; font-size:0.62rem; color:#9ca3af;
+            padding:2px 10px; border:1px solid #e5e7eb; border-radius:20px; background:#f9fafb;">v3.1</span>
     </div>
-    <p style="font-family:IBM Plex Mono,monospace; font-size:0.7rem; color:#2e2e2e; letter-spacing:0.08em;">
-        PHISHING DETECTION — URL · MESSAGE · EMAIL · SMS
+    <p style="font-family:'Inter',sans-serif; font-size:0.8rem; color:#9ca3af; font-weight:400;">
+        Phishing detection for URLs · Messages · Emails · Images
     </p>
 </div>
 """, unsafe_allow_html=True)
 
 selected = option_menu(
     menu_title=None,
-    options=["Message / Email / SMS", "URL / Link"],
-    icons=["envelope-fill", "link-45deg"],
+    options=["Message / Email", "URL / Link", "Image Scan"],
+    icons=["envelope", "link-45deg", "image"],
     orientation="horizontal",
     styles={
-        "container": {
-            "background-color": "#0d0d0d",
-            "border": "1px solid #1e1e1e",
-            "border-radius": "5px",
-            "padding": "2px",
-            "margin-bottom": "2rem"
-        },
-        "nav-link": {
-            "font-family": "IBM Plex Mono, monospace",
-            "font-size": "0.72rem",
-            "letter-spacing": "0.06em",
-            "color": "#383838",
-            "padding": "9px 20px",
-            "border-radius": "3px"
-        },
-        "nav-link-selected": {
-            "background-color": "#1a1a1a",
-            "color": "#d4d4d4",
-            "font-weight": "500"
-        },
-        "icon": {"display": "none"},
+        "container": {"background-color":"#f9fafb","border":"1.5px solid #f0f0f0",
+                      "border-radius":"10px","padding":"3px"},
+        "nav-link": {"font-family":"'Inter',sans-serif","font-size":"0.78rem","font-weight":"500",
+                     "color":"#9ca3af","padding":"9px 18px","border-radius":"7px"},
+        "nav-link-selected": {"background-color":"#111","color":"#fff","font-weight":"600"},
+        "icon": {"display":"none"},
     }
 )
 
-# ── TAB 1: Message / Email / SMS ─────────────────────────────────────────────
-if selected == "Message / Email / SMS":
-    render_section_label("Input — Paste message, email body, or SMS")
-    msg_input = st.text_area(
-        label="msg",
-        label_visibility="collapsed",
-        placeholder="Paste the full message here…\n\nExample: 'URGENT: Your PayPal account has been limited. Verify immediately at http://paypal-secure.xyz'",
-        height=170
-    )
+# ─── TAB 1: Message / Email ───────────────────────────────────────────────────
+if selected == "Message / Email":
+    label("Paste message, email body, or SMS text")
+    msg = st.text_area("msg", label_visibility="collapsed",
+        placeholder="Paste the full message here…\n\nExample: 'URGENT: Your PayPal account is limited. Verify immediately at http://paypal-secure.xyz/verify'",
+        height=170)
 
-    if st.button("ANALYZE MESSAGE →", key="msg_btn"):
-        if not msg_input.strip():
+    if st.button("ANALYZE MESSAGE →", key="mb"):
+        if not msg.strip():
             st.warning("Please paste a message to analyze.")
         else:
-            with st.spinner("Analyzing with ensemble engine…"):
-                ml_s, h_s, final_s, level, flags = analyze_message(msg_input)
+            with st.spinner("Running ensemble analysis…"):
+                ml_s, h_s, final_s, level, hits = analyze_message(msg)
+            score_block(final_s, level, f"ML model: {ml_s}%  ·  Heuristic: {h_s}%  ·  Final: {final_s}%")
 
-            render_score_block(
-                final_s, level,
-                f"ML model: {ml_s}%  ·  Heuristic: {h_s}%  ·  Final: {final_s}%"
-            )
-
-            render_section_label(f"Detection Reasons — {len(flags)} signal(s) found")
-            if flags:
-                for w, name, expl in sorted(flags, key=lambda x: -x[0]):
-                    render_flag(w, name, expl, is_safe=False)
+            label(f"Detection reasons — {len(hits)} signal{'s' if len(hits)!=1 else ''} found")
+            if hits:
+                for w, name, expl in sorted(hits, key=lambda x:-x[0]):
+                    flag_card(w, name, expl)
             else:
-                render_flag(0, "No Suspicious Patterns Detected",
-                    "This message does not match any known phishing patterns in our rule database.", is_safe=True)
+                flag_card(0,"No Suspicious Patterns Detected",
+                    "This message does not match any known phishing indicators.", safe=True)
 
-            if level in ("PHISHING", "SUSPICIOUS"):
-                render_section_label("Safety Recommendations")
-                flags_text = " ".join(n for _, n, _ in flags)
-                rec = get_safety_card("", flags_text)
-                render_safety_card(rec, level)
-            else:
-                render_section_label("General Safety Tips")
-                render_general_safety_tips()
+            if level in ("PHISHING","SUSPICIOUS"):
+                label("What to do instead")
+                ctx = " ".join(n for _,n,_ in hits)
+                safety_card(get_safety(ctx), level)
 
-# ── TAB 2: URL / Link ────────────────────────────────────────────────────────
+            label("How to protect yourself")
+            general_tips()
+
+# ─── TAB 2: URL / Link ───────────────────────────────────────────────────────
 elif selected == "URL / Link":
-    render_section_label("Input — Paste URL or link")
-    url_input = st.text_input(
-        label="url",
-        label_visibility="collapsed",
-        placeholder="https://example.com/login?verify=account"
-    )
+    label("Paste URL or link")
+    url_in = st.text_input("url", label_visibility="collapsed",
+        placeholder="https://example.com/login?verify=account")
 
-    if st.button("SCAN URL →", key="url_btn"):
-        if not url_input.strip():
+    if st.button("SCAN URL →", key="ub"):
+        if not url_in.strip():
             st.warning("Please paste a URL to scan.")
         else:
             with st.spinner("Running deep URL forensics…"):
-                score, level, flags = analyze_url(url_input.strip())
+                score, level, flags = analyze_url(url_in.strip())
+            score_block(score, level)
 
-            render_score_block(score, level)
+            label(f"Detection reasons — {len(flags)} signal{'s' if len(flags)!=1 else ''} found")
+            for sev, name, expl in sorted(flags, key=lambda x:-x[0]):
+                flag_card(sev, name, expl, safe=(level=="SAFE" or sev==0))
 
-            render_section_label(f"Detection Reasons — {len(flags)} signal(s) found")
-            for sev, name, expl in sorted(flags, key=lambda x: -x[0]):
-                render_flag(sev, name, expl, is_safe=(level == "SAFE" or sev == 0))
+            if level in ("PHISHING","SUSPICIOUS"):
+                label("What to do instead")
+                ctx = url_in + " " + " ".join(n for _,n,_ in flags)
+                safety_card(get_safety(ctx), level)
 
-            if level in ("PHISHING", "SUSPICIOUS"):
-                render_section_label("Safety Recommendations")
-                flags_text = " ".join(n for _, n, _ in flags)
-                rec = get_safety_card(url_input, flags_text)
-                render_safety_card(rec, level)
-                render_section_label("General Safety Tips")
-                render_general_safety_tips()
+            label("How to protect yourself")
+            general_tips()
 
+# ─── TAB 3: Image Scan ────────────────────────────────────────────────────────
+elif selected == "Image Scan":
+    label("Upload image to scan (JPG, PNG, GIF, WEBP)")
 
-# ── Footer ───────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style="font-family:'Inter',sans-serif; font-size:0.82rem; color:#6b7280;
+        background:#fafafa; border:1px solid #f0f0f0; border-radius:8px;
+        padding:12px 16px; margin-bottom:16px; line-height:1.6;">
+        <strong style="color:#374151;">What this scans for:</strong>
+        embedded URLs · suspicious keyword injection · tracking pixels (1×1 spyware) ·
+        file format mismatch (malware disguised as image) · encoded data blocks · QR-like payloads
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded = st.file_uploader("img", label_visibility="collapsed",
+        type=["jpg","jpeg","png","gif","webp","bmp"])
+
+    if uploaded:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.image(uploaded, use_column_width=True, caption=uploaded.name)
+        with col2:
+            st.markdown(f"""
+            <div style="font-size:0.8rem; color:#6b7280; line-height:1.9; padding:6px 0;">
+                <b style="color:#374151;">File:</b> {uploaded.name}<br>
+                <b style="color:#374151;">Size:</b> {len(uploaded.getvalue()):,} bytes ({len(uploaded.getvalue())/1024:.1f} KB)<br>
+                <b style="color:#374151;">Type:</b> {uploaded.type or 'unknown'}
+            </div>""", unsafe_allow_html=True)
+
+        if st.button("SCAN IMAGE →", key="imgb"):
+            with st.spinner("Analysing image for embedded threats…"):
+                img_score, img_level, img_flags, found_urls = analyze_image(uploaded)
+
+            score_block(img_score, img_level)
+
+            label(f"Detection reasons — {len(img_flags)} finding{'s' if len(img_flags)!=1 else ''}")
+            for sev, name, expl in sorted(img_flags, key=lambda x:-x[0]):
+                flag_card(sev, name, expl, safe=(img_level=="SAFE" or sev==0))
+
+            if found_urls:
+                label(f"Embedded URLs found ({len(found_urls)}) — scanning each")
+                for u in found_urls[:5]:
+                    u_score, u_level, u_flags = analyze_url(u)
+                    tc,_,_ = c_score(u_score, u_level)
+                    st.markdown(f"""
+                    <div style="border:1px solid #f0f0f0; border-radius:8px; padding:12px 14px;
+                        margin-bottom:8px; background:#fafafa;">
+                        <div style="font-family:'JetBrains Mono',monospace; font-size:0.73rem;
+                            color:#374151; word-break:break-all; margin-bottom:6px;">{u[:100]}</div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span style="font-size:1rem; font-weight:700; color:{tc};">{u_score}%</span>
+                            <span style="font-size:0.72rem; font-weight:700; letter-spacing:0.1em;
+                                text-transform:uppercase; color:{tc};">{u_level}</span>
+                            <span style="font-size:0.75rem; color:#9ca3af;">
+                                — {u_flags[0][1] if u_flags else 'No issues'}
+                            </span>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+            if img_level in ("PHISHING","SUSPICIOUS"):
+                label("What to do instead")
+                safety_card(get_safety(" ".join(n for _,n,_ in img_flags)), img_level)
+
+            label("How to spot phishing images")
+            image_phishing_guide()
+
+    else:
+        label("How to spot phishing images")
+        image_phishing_guide()
+
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
-<div style="
-    margin-top: 4rem;
-    padding-top: 1rem;
-    border-top: 1px solid #141414;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-">
-    <span style="font-family:IBM Plex Mono,monospace; font-size:0.6rem; color:#222; letter-spacing:0.1em;">PHISHGUARD v3.0</span>
-    <span style="font-family:IBM Plex Mono,monospace; font-size:0.6rem; color:#222; letter-spacing:0.06em;">{model_status}</span>
-    <span style="font-family:IBM Plex Mono,monospace; font-size:0.6rem; color:#222; letter-spacing:0.06em;">17 URL SIGNALS · 18 TEXT RULES · ENSEMBLE ML</span>
+<div style="margin-top:4rem; padding-top:1.2rem; border-top:1.5px solid #f0f0f0;
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px;">
+    <span style="font-family:'JetBrains Mono',monospace; font-size:0.62rem; color:#d1d5db;">
+        PHISHGUARD AI  v3.1
+    </span>
+    <span style="font-family:'JetBrains Mono',monospace; font-size:0.62rem; color:#d1d5db;">
+        {model_status}
+    </span>
+    <span style="font-family:'JetBrains Mono',monospace; font-size:0.62rem; color:#d1d5db;">
+        17 URL signals · 18 text rules · ensemble ML · image scanner
+    </span>
 </div>
 """, unsafe_allow_html=True)
