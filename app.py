@@ -3,470 +3,238 @@ from streamlit_option_menu import option_menu
 import pandas as pd
 import numpy as np
 import re
-import urllib.parse
-import ipaddress
-import string
-import cv2
-import easyocr
-import io
-from PIL import Image
+import tldextract
+import os
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
 
 # -----------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Phishing Defense",
+    page_title="Phishing Defense AI",
     page_icon="🛡️",
     layout="centered"
 )
 
 # -----------------------------------------------------------------------------
-# 2. ADVANCED HEURISTIC ENGINE (Local Intelligence)
+# 2. MACHINE LEARNING ENGINE (Trained on your dataset)
 # -----------------------------------------------------------------------------
-class PhishingAnalyzer:
-    def __init__(self):
-        # Dictionary of threat signatures
-        self.threat_db = {
-            "urgency": [
-                "urgent", "immediate", "act now", "suspended", "locked", "restricted", 
-                "unauthorized", "verify", "breach", "expires", "24 hours", "final notice",
-                "compromised", "action required"
-            ],
-            "financial": [
-                "wire", "transfer", "bank", "credit card", "debit", "irs", "tax", 
-                "refund", "bitcoin", "crypto", "payment", "invoice", "balance", "withdrawal"
-            ],
-            "scam_apps": [
-                "anydesk", "teamviewer", "zoho", "connectwise", "ultraviewer", 
-                "logmein", "remote support"
-            ],
-            "authority": [
-                "police", "fbi", "warrant", "arrest", "legal action", "law enforcement", 
-                "federal", "bureau", "social security", "ssa"
-            ],
-            "social_red_flags": [
-                "dm me", "direct message", "whatsapp", "telegram", "gift", "winner", 
-                "congratulations", "invest", "forex", "mentor"
-            ]
-        }
-        
-        # Typosquatting targets and their common spoofs
-        self.brands = {
-            "paypal": ["paypa1", "pypal", "pay-pal", "paypal-secure", "security-paypal"],
-            "google": ["goggle", "googie", "gooogle", "google-security", "drive-google"],
-            "amazon": ["arnazon", "amaz0n", "amazon-prime-support", "amzon"],
-            "facebook": ["faceb0ok", "face-book", "meta-security", "meta-support"],
-            "apple": ["appie", "apple-id", "icloud-verify"],
-            "netflix": ["net-flix", "netflix-update"],
-            "bank": ["secure-banking", "account-update"]
-        }
-
-    def calculate_risk_level(self, score):
-        if score >= 85: return "CRITICAL"
-        if score >= 60: return "HIGH"
-        if score >= 35: return "MEDIUM"
-        if score > 0: return "LOW"
-        return "SAFE"
-
-    def analyze_url(self, url):
-        score = 0
-        flags = []
-        
-        if not url.startswith(('http://', 'https://')):
-            url = 'http://' + url
-        
-        try:
-            parsed = urllib.parse.urlparse(url)
-            domain = parsed.hostname.lower() if parsed.hostname else ""
-            path = parsed.path.lower()
-        except:
-            return {"score": 0, "level": "Invalid", "flags": ["Invalid URL format"], "reason": "Could not parse URL."}
-
-        try:
-            ipaddress.ip_address(domain)
-            score += 80
-            flags.append("Domain is a raw IP address (Highly Suspicious)")
-        except ValueError:
-            pass
-
-        if len(domain) > 50:
-            score += 20
-            flags.append("Extremely long domain name")
-        
-        if domain.count('-') > 2:
-            score += 30
-            flags.append("Excessive use of hyphens in domain")
+@st.cache_resource
+def load_and_train_model():
+    """Trains a Machine Learning model using your 10,000 message dataset."""
+    try:
+        # Tries to load the dataset you uploaded to GitHub
+        if os.path.exists('sms_spam_10000_dataset.csv'):
+            df = pd.read_csv('sms_spam_10000_dataset.csv')
             
-        if '@' in url:
-            score += 90
-            flags.append("Contains '@' symbol (Authentication bypass attempt)")
+            # Handle different common column names in datasets
+            if 'Category' in df.columns and 'Message' in df.columns:
+                X = df['Message']
+                y = df['Category'].apply(lambda x: 1 if str(x).lower() == 'spam' else 0)
+            elif 'v1' in df.columns and 'v2' in df.columns:
+                X = df['v2']
+                y = df['v1'].apply(lambda x: 1 if str(x).lower() == 'spam' else 0)
+            else:
+                return None, "Dataset columns not recognized. Ensure columns are 'Category' and 'Message'."
 
-        brand_detected = False
-        for brand, variations in self.brands.items():
-            if brand in path and brand not in domain:
-                score += 40
-                flags.append(f"Brand '{brand}' found in URL path, not domain")
+            # Create an AI Pipeline (TF-IDF + Naive Bayes)
+            model = Pipeline([
+                ('tfidf', TfidfVectorizer(stop_words='english', max_features=5000)),
+                ('clf', MultinomialNB(alpha=0.1)) # Alpha 0.1 makes it more sensitive to spam
+            ])
             
-            if brand in domain and not domain.endswith(f".{brand}.com") and domain != f"{brand}.com":
-                score += 50
-                flags.append(f"Suspicious use of '{brand}' in subdomain")
-
-            for var in variations:
-                if var in domain:
-                    score += 85
-                    flags.append(f"Typosquatting detected: '{var}' mimics '{brand}'")
-                    brand_detected = True
-        
-        suspicious_tlds = ['.xyz', '.top', '.club', '.info', '.cn', '.ru', '.gq', '.ml']
-        if any(domain.endswith(tld) for tld in suspicious_tlds):
-            score += 20
-            flags.append("Uses a TLD often associated with spam")
-
-        if score == 0:
-            reason = "URL structure appears standard. No obvious heuristic threats detected."
+            model.fit(X, y)
+            return model, "✅ AI Model loaded and trained on 10,000 messages."
         else:
-            reason = "Multiple structural anomalies detected."
+            return None, "Dataset file 'sms_spam_10000_dataset.csv' not found in repository."
+    except Exception as e:
+        return None, f"Error training model: {e}"
 
-        return {
-            "score": min(score, 100),
-            "level": self.calculate_risk_level(score),
-            "flags": flags,
-            "reason": reason
-        }
-
-    def analyze_text(self, text, context="general"):
-        score = 0
-        flags = []
-        text_lower = text.lower()
-        
-        urgency_count = sum(1 for w in self.threat_db["urgency"] if w in text_lower)
-        financial_count = sum(1 for w in self.threat_db["financial"] if w in text_lower)
-        
-        if urgency_count > 0:
-            score += 25 + (urgency_count * 5)
-            flags.append("Contains high-pressure urgency language")
-            
-        if financial_count > 0:
-            score += 25 + (financial_count * 5)
-            flags.append("Requests financial information or payment")
-
-        has_link = bool(re.search(r'http[s]?://|www\.', text_lower))
-        
-        if context == "SMS":
-            if has_link and urgency_count > 0:
-                score += 40
-                flags.append("Smishing Indicator: Urgency + Link")
-            if "package" in text_lower or "delivery" in text_lower:
-                if has_link:
-                    score += 30
-                    flags.append("Fake Delivery Scam pattern")
-
-        if context == "SOCIAL":
-            for phrase in self.threat_db["social_red_flags"]:
-                if phrase in text_lower:
-                    score += 30
-                    flags.append(f"Suspicious social phrase: '{phrase}'")
-            if "fill" in text_lower and "form" in text_lower:
-                score += 30
-                flags.append("Request to fill external form")
-
-        if context == "VOICE":
-            scam_apps = sum(1 for w in self.threat_db["scam_apps"] if w in text_lower)
-            auth_apps = sum(1 for w in self.threat_db["authority"] if w in text_lower)
-            
-            if scam_apps > 0:
-                score += 80
-                flags.append("Tech Support Scam: Remote Access Software mentioned")
-            if auth_apps > 0:
-                score += 70
-                flags.append("Authority Impersonation (Police/Gov)")
-            if "gift card" in text_lower:
-                score += 90
-                flags.append("Demanding payment via Gift Cards")
-
-        final_score = min(score, 100)
-        
-        reason = "Analysis complete based on behavioral heuristics."
-        if final_score < 20: reason = "Content appears normal."
-        elif final_score < 50: reason = "Some cautionary language detected."
-        else: reason = "Significant indicators of social engineering present."
-
-        return {
-            "score": final_score,
-            "level": self.calculate_risk_level(final_score),
-            "flags": flags,
-            "reason": reason
-        }
-
-    def analyze_social_profile(self, handle, message):
-        score = 0
-        flags = []
-        handle_lower = handle.lower()
-        
-        if "support" in handle_lower or "help" in handle_lower or "service" in handle_lower:
-            if re.search(r'\d{3,}$', handle_lower):
-                score += 60
-                flags.append("Fake Support Handle: Ends in random numbers")
-            
-            if handle_lower.count('_') > 1:
-                score += 30
-                flags.append("Suspicious handle formatting")
-        
-        text_result = self.analyze_text(message, context="SOCIAL")
-        score += text_result["score"]
-        flags.extend(text_result["flags"])
-        
-        return {
-            "score": min(score, 100),
-            "level": self.calculate_risk_level(min(score, 100)),
-            "flags": flags,
-            "reason": text_result["reason"]
-        }
-
-analyzer = PhishingAnalyzer()
+# Load the AI Brain
+ai_model, system_status = load_and_train_model()
 
 # -----------------------------------------------------------------------------
-# 3. CSS (Light Minimalist)
+# 3. URL FORENSICS ENGINE
 # -----------------------------------------------------------------------------
-light_mode_css = """
+def analyze_url_accuracy(url):
+    """A highly accurate, rule-based lexical analyzer for URLs."""
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+        
+    ext = tldextract.extract(url)
+    domain = ext.domain.lower()
+    suffix = ext.suffix.lower()
+    subdomain = ext.subdomain.lower()
+    
+    score = 0
+    flags = []
+    
+    # 1. Whitelist Safe Domains (Prevents False Positives)
+    safe_domains = ['google', 'youtube', 'facebook', 'github', 'linkedin', 'microsoft', 'apple', 'amazon', 'wikipedia']
+    if domain in safe_domains:
+        return 0, "SAFE", ["Verified Safe Domain (Whitelist)"]
+
+    # 2. IP Address Check (Critical Phishing Trait)
+    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", domain):
+        score += 85
+        flags.append("🚨 Domain is a hidden IP Address (Very High Risk)")
+
+    # 3. Subdomain Anomalies
+    subdomain_parts = subdomain.split('.')
+    if len(subdomain_parts) >= 3 and subdomain != '':
+        score += 40
+        flags.append(f"Excessive subdomains detected ({len(subdomain_parts)} parts)")
+        
+    if 'www' in subdomain_parts and len(subdomain_parts) > 1:
+        if any(brand in subdomain for brand in safe_domains):
+            score += 60
+            flags.append("Brand impersonation in subdomain (e.g., google.login-secure.com)")
+
+    # 4. Length and Characters
+    if len(url) > 75:
+        score += 20
+        flags.append("Unusually long URL structure")
+    if url.count('-') > 3:
+        score += 25
+        flags.append("Excessive hyphens (Common in phishing sites)")
+    if '@' in url:
+        score += 80
+        flags.append("🚨 Contains '@' symbol (Browser credential spoofing)")
+
+    # 5. Suspicious TLDs
+    bad_tlds = ['xyz', 'top', 'club', 'online', 'vip', 'click', 'tk', 'ml']
+    if suffix in bad_tlds:
+        score += 45
+        flags.append(f"Suspicious Top-Level Domain (.{suffix})")
+
+    # 6. Sensitive Slugs
+    if any(keyword in url.lower() for keyword in ['login', 'verify', 'update', 'secure', 'account', 'banking']):
+        score += 20
+        flags.append("URL contains sensitive action keywords")
+
+    # Final Calculation
+    score = min(score, 100)
+    
+    if score >= 60: level = "CRITICAL"
+    elif score >= 35: level = "SUSPICIOUS"
+    else: level = "SAFE"
+    
+    if score == 0: flags.append("URL structure is clean and standard.")
+    
+    return score, level, flags
+
+# -----------------------------------------------------------------------------
+# 4. CLAYMORPHISM CSS
+# -----------------------------------------------------------------------------
+st.markdown("""
 <style>
-.stApp {
-    background-color: #ffffff;
-    color: #111827;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-}
+.stApp { background-color: #f0f4f8; font-family: 'Nunito', sans-serif; }
 .minimal-card {
-    background-color: #ffffff;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 32px;
+    background-color: #f0f4f8;
+    border-radius: 20px;
+    padding: 30px;
     margin-bottom: 24px;
-    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-    transition: all 0.2s ease;
+    box-shadow: 10px 10px 20px #d1d5db, -10px -10px 20px #ffffff;
 }
-.minimal-card:hover {
-    border-color: #d1d5db;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-}
-.minimal-card h3 {
-    font-weight: 600;
-    font-size: 1.125rem;
-    color: #111827;
-    margin-bottom: 8px;
-}
-.minimal-card p {
-    font-size: 0.875rem;
-    color: #6b7280;
-    line-height: 1.5;
-}
-.stTextInput > div > div > input, 
-.stTextArea > div > div > textarea {
-    background-color: #f9fafb !important;
-    border: 1px solid #d1d5db !important;
-    border-radius: 6px !important;
-    color: #111827 !important;
-    padding: 10px 12px !important;
-    font-size: 0.95rem !important;
-}
-.stTextInput > div > div > input:focus, 
-.stTextArea > div > div > textarea:focus {
-    border-color: #000000 !important;
-    box-shadow: 0 0 0 1px #000000 !important;
+.stTextInput > div > div > input, .stTextArea > div > div > textarea {
+    background-color: #f0f4f8 !important;
+    border: none !important;
+    border-radius: 12px !important;
+    box-shadow: inset 5px 5px 10px #d1d5db, inset -5px -5px 10px #ffffff !important;
+    padding: 15px !important;
 }
 div.stButton > button {
-    background-color: #111827 !important;
-    color: #ffffff !important;
-    border: 1px solid #111827 !important;
-    border-radius: 6px !important;
-    padding: 10px 24px !important;
-    font-weight: 500 !important;
+    background-color: #f0f4f8 !important;
+    color: #3182ce !important;
+    font-weight: bold !important;
+    border: none !important;
+    border-radius: 50px !important;
+    padding: 12px 24px !important;
+    box-shadow: 6px 6px 12px #d1d5db, -6px -6px 12px #ffffff !important;
+    width: 100%;
 }
 div.stButton > button:hover {
-    background-color: #374151 !important;
-    border-color: #374151 !important;
+    box-shadow: inset 4px 4px 8px #d1d5db, inset -4px -4px 8px #ffffff !important;
 }
-div[data-testid="stMetricValue"] {
-    font-weight: 600 !important;
-    font-size: 2rem !important;
-    color: #111827 !important;
-}
-div[data-testid="stMetricLabel"] {
-    color: #6b7280 !important;
-}
-header {visibility: hidden;}
-footer {visibility: hidden;}
 </style>
-"""
-st.markdown(light_mode_css, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 4. UI HELPERS
+# 5. MAIN APP UI
 # -----------------------------------------------------------------------------
-def card_start(title=None):
-    html = '<div class="minimal-card">'
-    if title: html += f'<h3>{title}</h3>'
-    st.markdown(html, unsafe_allow_html=True)
-
-def card_end():
-    st.markdown('</div>', unsafe_allow_html=True)
-
-def display_results(result):
-    if not result: return
-    st.divider()
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.metric("Risk Score", f"{result['score']}")
-        level = result['level']
-        color = "#10b981" 
-        if level in ["HIGH", "CRITICAL"]: color = "#ef4444"
-        elif level == "MEDIUM": color = "#f97316"
-        st.markdown(f"<span style='color:{color}; font-weight:700; letter-spacing:0.05em;'>{level} RISK</span>", unsafe_allow_html=True)
-    with c2:
-        st.subheader("Details")
-        if not result['flags']:
-            st.success("No specific threat patterns detected.")
-        else:
-            for f in result['flags']:
-                st.markdown(f"🚩 {f}")
-        st.caption(f"Reasoning: {result['reason']}")
-
-# -----------------------------------------------------------------------------
-# 5. MAIN APP
-# -----------------------------------------------------------------------------
-st.markdown("<h1 style='color:#111827; font-weight:700; letter-spacing:-0.03em;'>Phishing Defense</h1>", unsafe_allow_html=True)
-st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center; color:#2d3748;'>🛡️ CyberSafe AI</h1>", unsafe_allow_html=True)
+st.caption(f"<div style='text-align:center;'>{system_status}</div>", unsafe_allow_html=True)
 
 selected = option_menu(
     menu_title=None,
-    options=["Dashboard", "URL Scanner", "Smishing", "Social", "Vishing", "Forensics"],
-    icons=["grid", "globe", "chat-text", "people", "mic", "camera"],
-    default_index=0,
+    options=["Text/SMS Analyzer", "URL Analyzer"],
+    icons=["chat-left-text", "globe"],
     orientation="horizontal",
     styles={
-        "container": {"padding": "0!important", "background-color": "transparent"},
-        "icon": {"color": "#6b7280", "font-size": "14px"}, 
-        "nav-link": {"font-size": "13px", "text-align": "center", "margin": "0px 8px 0px 0px", "color": "#4b5563", "background-color": "transparent"},
-        "nav-link-selected": {"background-color": "#f3f4f6", "color": "#111827", "font-weight": "600"},
+        "container": {"background-color": "#f0f4f8", "border-radius": "15px", "box-shadow": "5px 5px 10px #d1d5db, -5px -5px 10px #ffffff"},
+        "nav-link-selected": {"background-color": "#f0f4f8", "color": "#3182ce", "box-shadow": "inset 3px 3px 6px #d1d5db, inset -3px -3px 6px #ffffff"},
     }
 )
-st.write("")
 
-if selected == "Dashboard":
-    st.markdown("<div class='minimal-card' style='text-align:center; padding:40px;'><h3 style='font-size:1.5rem;'>Unified Defense Suite</h3><p>Advanced Heuristic Detection • No API Keys Required</p></div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        card_start("URL Scanner")
-        st.write("Detects typosquatting, IP masking, and malicious structures.")
-        card_end()
-    with c2:
-        card_start("Smishing")
-        st.write("Analyzes SMS for urgency, financial keywords, and links.")
-        card_end()
-    with c3:
-        card_start("Social Media")
-        st.write("Identifies fake support handles and angler phishing.")
-        card_end()
-    c4, c5 = st.columns(2)
-    with c4:
-        card_start("Voice Analysis")
-        st.write("Scans transcripts for Tech Support & IRS scam scripts.")
-        card_end()
-    with c5:
-        card_start("Forensics")
-        st.write("OCR & QR Code extraction with automated scanning.")
-        card_end()
-
-elif selected == "URL Scanner":
-    card_start()
-    st.markdown("### URL Scanner")
-    url_input = st.text_input("Enter URL", placeholder="http://example.com", label_visibility="collapsed")
-    if st.button("Scan Link"):
-        if url_input:
-            res = analyzer.analyze_url(url_input)
-            display_results(res)
+if selected == "Text/SMS Analyzer":
+    st.markdown("<div class='minimal-card'><h3>💬 Phishing Message Detector</h3>", unsafe_allow_html=True)
+    msg_input = st.text_area("Paste SMS, Email, or DM here:", height=150)
+    
+    if st.button("Analyze Message"):
+        if not msg_input.strip():
+            st.warning("Please enter a message.")
+        elif ai_model is None:
+            st.error("AI Model failed to load. Check if your dataset is in the repository.")
         else:
-            st.warning("Input required.")
-    card_end()
+            with st.spinner("AI is analyzing context..."):
+                # Predict probability
+                prob = ai_model.predict_proba([msg_input])[0][1]
+                risk_score = int(prob * 100)
+                
+                # Visuals
+                if risk_score > 60:
+                    color, level = "#e53e3e", "CRITICAL RISK"
+                elif risk_score > 35:
+                    color, level = "#dd6b20", "SUSPICIOUS"
+                else:
+                    color, level = "#38a169", "SAFE"
+                
+                st.markdown(f"""
+                <div style="text-align:center; padding:20px;">
+                    <h1 style="color:{color}; font-size:4rem; margin:0;">{risk_score}%</h1>
+                    <h3 style="color:{color}; margin:0;">{level}</h3>
+                    <p style="color:#718096; margin-top:10px;">Powered by Machine Learning (10k Dataset)</p>
+                </div>
+                """, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-elif selected == "Smishing":
-    card_start()
-    st.markdown("### Smishing Detector")
-    txt = st.text_area("Message", placeholder="Paste message...", height=120, label_visibility="collapsed")
-    if st.button("Analyze SMS"):
-        if txt:
-            res = analyzer.analyze_text(txt, context="SMS")
-            display_results(res)
+elif selected == "URL Analyzer":
+    st.markdown("<div class='minimal-card'><h3>🔗 Link Forensics</h3>", unsafe_allow_html=True)
+    url_input = st.text_input("Paste web address here:")
+    
+    if st.button("Scan URL"):
+        if not url_input.strip():
+            st.warning("Please enter a URL.")
         else:
-            st.warning("Input required.")
-    card_end()
-
-elif selected == "Social":
-    card_start()
-    st.markdown("### Social Media Scanner")
-    c1, c2 = st.columns(2)
-    with c1:
-        h = st.text_input("Handle", placeholder="@PayPal_Support_123")
-    with c2:
-        m = st.text_input("Message", placeholder="DM us for help...")
-    if st.button("Scan Profile"):
-        if h and m:
-            res = analyzer.analyze_social_profile(h, m)
-            display_results(res)
-        else:
-            st.warning("Both handle and message are required.")
-    card_end()
-
-elif selected == "Vishing":
-    card_start()
-    st.markdown("### Voice Transcript")
-    v_txt = st.text_area("Transcript", placeholder="Transcript...", height=150, label_visibility="collapsed")
-    if st.button("Scan Transcript"):
-        if v_txt:
-            res = analyzer.analyze_text(v_txt, context="VOICE")
-            display_results(res)
-        else:
-            st.warning("Input required.")
-    card_end()
-
-elif selected == "Forensics":
-    @st.cache_resource
-    def load_ocr():
-        return easyocr.Reader(['en'], gpu=False)
-
-    card_start()
-    st.markdown("### Forensics")
-    uf = st.file_uploader("Upload", type=['png','jpg','jpeg'], label_visibility="collapsed")
-    if uf:
-        try:
-            file_bytes = np.asarray(bytearray(uf.read()), dtype=np.uint8)
-            img = cv2.imdecode(file_bytes, 1)
-            if img is not None:
-                st.image(img, channels="BGR", width=300)
-                st.divider()
-                try:
-                    det = cv2.QRCodeDetector()
-                    data, _, _ = det.detectAndDecode(img)
-                    if data:
-                        st.info(f"QR Data: {data}")
-                        q_res = analyzer.analyze_url(data)
-                        display_results(q_res)
-                    else:
-                        st.caption("No QR Code.")
-                except: pass
+            with st.spinner("Analyzing domain structure..."):
+                score, level, flags = analyze_url_accuracy(url_input)
+                
+                if score >= 60: color = "#e53e3e"
+                elif score >= 35: color = "#dd6b20"
+                else: color = "#38a169"
+                
+                st.markdown(f"""
+                <div style="text-align:center; padding:10px;">
+                    <h2 style="color:{color}; font-size:3rem; margin:0;">{score}%</h2>
+                    <h4 style="color:{color}; margin:0;">{level}</h4>
+                </div>
+                """, unsafe_allow_html=True)
+                
                 st.markdown("---")
-                try:
-                    with st.spinner("Extracting text..."):
-                        reader = load_ocr()
-                        raw_res = reader.readtext(img, detail=0)
-                        extracted = " ".join(raw_res)
-                        if extracted.strip():
-                            st.text_area("Extracted Text", extracted, height=100)
-                            ocr_res = analyzer.analyze_text(extracted, context="SMS")
-                            display_results(ocr_res)
-                        else:
-                            st.info("No readable text found.")
-                except Exception as e:
-                    st.error(f"OCR Error: {e}")
-        except:
-            st.error("File error.")
-    card_end()
+                st.write("**Detection Flags:**")
+                for f in flags:
+                    if score == 0: st.success(f"✅ {f}")
+                    else: st.error(f"🚩 {f}")
+    st.markdown("</div>", unsafe_allow_html=True)
