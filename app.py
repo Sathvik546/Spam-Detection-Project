@@ -6,7 +6,7 @@ import re
 import tldextract
 import os
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 # -----------------------------------------------------------------------------
@@ -39,10 +39,11 @@ def load_and_train_model():
             else:
                 return None, "Dataset columns not recognized. Ensure columns are 'Category' and 'Message'."
 
-            # Create an AI Pipeline (TF-IDF + Naive Bayes)
+            # Create an AI Pipeline (TF-IDF + Logistic Regression for better probability calibration)
             model = Pipeline([
-                ('tfidf', TfidfVectorizer(stop_words='english', max_features=5000)),
-                ('clf', MultinomialNB(alpha=0.1)) # Alpha 0.1 makes it more sensitive to spam
+                # ngram_range=(1,2) helps the model learn phrases like "act now" or "bank account"
+                ('tfidf', TfidfVectorizer(stop_words='english', max_features=5000, ngram_range=(1, 2))),
+                ('clf', LogisticRegression(max_iter=1000)) 
             ])
             
             model.fit(X, y)
@@ -193,10 +194,10 @@ if selected == "Text/SMS Analyzer":
                 prob = ai_model.predict_proba([msg_input])[0][1]
                 risk_score = int(prob * 100)
                 
-                # Visuals
-                if risk_score > 60:
+                # Visuals (Adjusted thresholds for higher accuracy on safe messages)
+                if risk_score >= 70:
                     color, level = "#e53e3e", "CRITICAL RISK"
-                elif risk_score > 35:
+                elif risk_score >= 45:
                     color, level = "#dd6b20", "SUSPICIOUS"
                 else:
                     color, level = "#38a169", "SAFE"
